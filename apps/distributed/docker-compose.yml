@@ -83,8 +83,25 @@ services:
       WORKSPACE_PORT: "3200"
       WORKSPACE_ROOT: /workspaces
       WORKSPACE_SERVICE_TOKEN: ${WORKSPACE_SERVICE_TOKEN:-distributed-local-workspace-token-change-me}
+      DATABASE_URL: postgres://dsh:dsh@postgres:5432/dsh
+      REDIS_URL: redis://redis:6379
+      MOCK_LLM_DELAY_MS: "300"
+      DISTRIBUTED_LLM_MODE: ${DISTRIBUTED_LLM_MODE:-mock}
+      DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-distributed-mock}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-mock-agent}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+      DEEPSEEK_SEARCH_BASE_URL: ${DEEPSEEK_SEARCH_BASE_URL:-https://api.deepseek.com/anthropic/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      MODEL_CONFIG_ENCRYPTION_KEY: ${MODEL_CONFIG_ENCRYPTION_KEY:-distributed-local-development-key-change-me}
     volumes:
       - workspace-data:/workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 3s

@@ -8,7 +8,8 @@ RUN apt-get update \
 
 COPY . .
 ENV npm_config_nodedir=/usr/local
-RUN pnpm install --filter @deepseek-ai/dsh-distributed... --frozen-lockfile
+RUN pnpm install --frozen-lockfile
+RUN pnpm run build:lib:host
 
 ENV NODE_ENV=production
 CMD ["node", "--import", "tsx", "apps/distributed/src/workspace-service.ts"]

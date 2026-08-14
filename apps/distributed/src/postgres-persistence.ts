@@ -14,8 +14,13 @@ import SessionPersistence, {
 } from '@deepseek-ai/dsh-session-persistence'
 import type { PoolClient } from 'pg'
 import { pool, tx } from './db.ts'
-import { splitInternalSessionId } from './identity.ts'
+import { assertUuid, splitInternalSessionId } from './identity.ts'
 import { workspaceRootPath } from './workspace-path.ts'
+
+export interface Config {
+  tenantId: string
+  workspaceId: string
+}
 
 interface SessionRow {
   tenant_id: string
@@ -29,11 +34,21 @@ function revision(row: SessionRow): SessionPersistenceRevision {
   return SessionPersistenceRevision(`postgres:${row.tenant_id}:${row.id}:${row.revision}`)
 }
 
-async function sessionRow(client: PoolClient, id: SessionId, lock = false): Promise<SessionRow | undefined> {
-  const { tenantId, sessionId } = splitInternalSessionId(id)
+function databaseIdentity(id: SessionId, config: Config): { tenantId: string; sessionId: string } {
+  if (String(id).includes('/')) {
+    const identity = splitInternalSessionId(id)
+    if (identity.tenantId !== config.tenantId) throw new Error(`session belongs to another tenant: ${id}`)
+    return identity
+  }
+  return { tenantId: config.tenantId, sessionId: assertUuid(String(id), 'sessionId') }
+}
+
+async function sessionRow(client: PoolClient, id: SessionId, config: Config, lock = false): Promise<SessionRow | undefined> {
+  const { tenantId, sessionId } = databaseIdentity(id, config)
   const result = await client.query<SessionRow>(
-    `SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE tenant_id = $1 AND id = $2${lock ? ' FOR UPDATE' : ''}`,
-    [tenantId, sessionId],
+    `SELECT tenant_id, id, header, workspace_id, revision FROM sessions
+     WHERE tenant_id = $1 AND id = $2 AND workspace_id = $3${lock ? ' FOR UPDATE' : ''}`,
+    [tenantId, sessionId, config.workspaceId],
   )
   const row = result.rows[0]
   if (row?.header === null || row === undefined || row.workspace_id === null) return row
@@ -51,7 +66,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
 
   private readonly coordinator: PersistenceCoordinator<never>
 
-  constructor(ctx: Context) {
+  constructor(ctx: Context, private readonly config: Config) {
     super(ctx)
     this.coordinator = new PersistenceCoordinator(ctx, this, {
       preparedSessionCacheSize: DEFAULT_PREPARED_SESSION_CACHE_SIZE,
@@ -92,7 +107,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     const client = await pool.connect()
     try {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-      const row = await sessionRow(client, id)
+      const row = await sessionRow(client, id, this.config)
       if (row?.header === null || row === undefined) {
         await client.query('COMMIT')
         return undefined
@@ -113,7 +128,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     signal?.throwIfAborted()
     const client = await pool.connect()
     try {
-      const row = await sessionRow(client, id)
+      const row = await sessionRow(client, id, this.config)
       signal?.throwIfAborted()
       return row?.header === null || row === undefined ? undefined : revision(row)
     } finally {
@@ -125,7 +140,7 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
     signal?.throwIfAborted()
     const client = await pool.connect()
     try {
-      const row = await sessionRow(client, id)
+      const row = await sessionRow(client, id, this.config)
       if (row?.header === null || row === undefined) return undefined
       const events = await this.readEvents(client, row.tenant_id, row.id, fromSeq)
       signal?.throwIfAborted()
@@ -136,9 +151,25 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
   }
 
   async appendBatch(meta: SessionHeader, events: readonly SessionEvent[], _isMaterialized: boolean): Promise<void> {
-    const { tenantId, sessionId } = splitInternalSessionId(meta.id)
+    const { tenantId, sessionId } = databaseIdentity(meta.id, this.config)
     await tx(async (client) => {
-      const row = await sessionRow(client, meta.id, true)
+      let row = await sessionRow(client, meta.id, this.config, true)
+      if (row === undefined && meta.origin === 'subagent' && meta.parentSession !== undefined) {
+        const parent = databaseIdentity(meta.parentSession, this.config)
+        const inserted = await client.query(`
+          INSERT INTO sessions
+            (tenant_id, id, owner_user_id, workspace_id, workspace_order, provider, model,
+             agent_preset, permission_preset, parent_session_id, header)
+          SELECT tenant_id, $3, owner_user_id, workspace_id,
+            -floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint,
+            provider, model, agent_preset, permission_preset, $4, $5::jsonb
+          FROM sessions
+          WHERE tenant_id = $1 AND id = $2 AND workspace_id = $6
+          ON CONFLICT (tenant_id, id) DO NOTHING
+        `, [tenantId, parent.sessionId, sessionId, parent.sessionId, JSON.stringify(meta), this.config.workspaceId])
+        if (inserted.rowCount !== 1) throw new Error(`subagent parent session does not exist: ${meta.parentSession}`)
+        row = await sessionRow(client, meta.id, this.config, true)
+      }
       if (row === undefined) throw new Error(`session does not exist: ${meta.id}`)
       if (row.header === null) {
         await client.query('UPDATE sessions SET header = $3::jsonb WHERE tenant_id = $1 AND id = $2', [tenantId, sessionId, JSON.stringify(meta)])
@@ -163,7 +194,10 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
 
   async list(signal?: AbortSignal): Promise<SessionHeader[]> {
     signal?.throwIfAborted()
-    const result = await pool.query<SessionRow>('SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
+    const result = await pool.query<SessionRow>(
+      'SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE tenant_id = $1 AND workspace_id = $2 AND header IS NOT NULL ORDER BY created_at',
+      [this.config.tenantId, this.config.workspaceId],
+    )
     signal?.throwIfAborted()
     return result.rows.flatMap(row => row.header === null ? [] : [{
       ...structuredClone(row.header),
@@ -173,7 +207,10 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
 
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     signal?.throwIfAborted()
-    const result = await pool.query<SessionRow>('SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
+    const result = await pool.query<SessionRow>(
+      'SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE tenant_id = $1 AND workspace_id = $2 AND header IS NOT NULL ORDER BY created_at',
+      [this.config.tenantId, this.config.workspaceId],
+    )
     signal?.throwIfAborted()
     return result.rows.flatMap(row => row.header === null ? [] : [{
       header: {

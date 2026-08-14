@@ -21,26 +21,27 @@ flowchart LR
 
 ## 运行与测试
 
-在仓库根目录启动两个 API 副本和两个 Worker 副本，然后在 Compose 网络内运行分布式调度测试：
+在仓库根目录启动一个 API 副本和两个 Worker 副本，然后在 Compose 网络内运行分布式调度与上游工具一致性测试：
 
 ```sh
-docker compose -f apps/distributed/docker-compose.yml up -d --build --remove-orphans --scale api=2 --scale worker=2
-docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://api:3100 -e DSH_WEB_URL=http://web -e DSH_EXPECT_API_REPLICAS=2 -e DSH_EXPECT_WORKER_REPLICAS=2 api node apps/distributed/scripts/e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml up -d --build --remove-orphans --scale api=1 --scale worker=2
+docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_API_URL=http://api:3100 -e DSH_WEB_URL=http://web -e DSH_EXPECT_API_REPLICAS=1 -e DSH_EXPECT_WORKER_REPLICAS=2 api node apps/distributed/scripts/e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T api node apps/distributed/scripts/tool-parity-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T workspace node apps/distributed/scripts/workspace-e2e.mjs
-docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_WEB_URL=http://web api node apps/distributed/scripts/web-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=http://web api node apps/distributed/scripts/web-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml --profile test up -d openai-mock
 docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://web api node apps/distributed/scripts/openai-e2e.mjs
 ```
 
-仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，通过 Compose DNS 发现全部 `api` 服务副本，并转发经过认证的 HTTP RPC 与 WebSocket 流量；Web 容器本身不运行 agent。可工作的分布式适配器覆盖工作区与会话管理、持久历史、提示词与取消、实时事件、工具、设置、加密凭据、模型选择、agent 预设、权限与计划模式、目标、消息反馈、skill 和上下文压缩。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 agent loop、远程工具派发、检查点持久化、API 入口分流、多 Worker 分配、租户隔离、会话恢复和 Web–API 兼容协议。
+仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，通过 Compose DNS 发现全部 `api` 副本，并转发经过认证的 HTTP RPC 与 WebSocket 流量；Web 容器本身不运行 Agent。分布式适配器覆盖持久会话、设置、模型、权限、目标、交互、子 Agent、工作流、Code Mode、动态 Cordis 插件、上下文压缩和所有上游已发布预设的完整工具目录。确定性探针会执行真实的上游 Agent Loop 与工具实现，因此无需消耗模型额度，也能覆盖 PostgreSQL 检查点、API 入口、多 Worker 分配、租户隔离、会话恢复、动态浏览器 RPC 和 Web 兼容协议。
 
 副本数是部署参数，不再写死为 Compose 服务。重新执行 `docker compose -f apps/distributed/docker-compose.yml up -d --scale api=3 --scale worker=4` 即可模拟 Kubernetes Deployment 扩缩容。容器 hostname 会生成唯一的 API 与 Worker 实例 ID，Nginx 会重新解析 `api` 服务名，Redis consumer group 会把命令分配给存活 Worker。至少保留一个 API 与一个 Worker；Workspace 服务独占共享卷和长生命周期后台任务注册表，因此不支持横向扩展。
 
-一个内部 Workspace 服务独占 `workspace-data` 卷。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。Worker 会为上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` 定义注册 RPC 代理，而原始上游实现在 Workspace 容器内执行。因此前台与后台 shell 进程、ripgrep 搜索和文件修改可在两个 Worker 之间共享同一个持久目录，并能跨 Workspace 服务重启保留。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
+一个内部 Workspace 服务独占 `workspace-data` 卷并承载长生命周期的上游 Agent 运行时。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。队列 Worker 把完整命令委托给 Workspace 中保留的 Agent handle，而不是重新构建运行时或代理一份挑选过的工具列表。因此 schema、提示、渲染器、Code Mode、子 Agent 与工作流生命周期、Cordis 插件、前后台命令、搜索和文件修改均由官方预设组合拥有。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
 
-分布式适配器是 Cordis 插件，而不是上游工具的 fork。Workspace 运行时插件在一个工作区作用域生命周期内组合原始文件系统、搜索、编辑器、Bash 和后台任务提供方；Worker 适配器拥有远程目录监听器和代理注册。每个非 minimal 命令运行时都会挂载上游 token 计量、基础压缩、工具结果裁剪、计划模式、`todo_write` 工具和重复调用提醒。工作区内的 `.dsh/skills` 与 `.agents/skills` 文件会进入目录，并可通过面向模型的 `skill` 工具加载。Web 组装器从上游 `base` 与 `web-app` Cordis 组合推导完整客户端清单，不维护分布式白名单。[架构决策](../../.agents/notes/implemented/architecture/2026-08-14-distributed-upstream-composition.md) 区分了这种客户端组合一致性和仍需分布式所有者的高级能力。
+分布式适配器是 Cordis 插件，而不是上游工具的 fork。Workspace 启动上游 `base`、`web-app` Host 组合以及官方 `standard`、`code`、`minimal`、`cordis` 预设。standard 包含文件、Bash、后台任务、skill、目标、计划、todo、联网搜索、委派、工作流、Ralph 与交互工具；Code Mode 通过 `run_code` 展示同一组能力；minimal 保留基于持久终端的 `bash` 与 `str_replace_editor`；Cordis 增加七个动态插件工具。工作区 skill 仍可通过 `skill` 使用，PostgreSQL 中的租户预设会在挂载前写入官方用户预设目录，Web Host 的会话查询服务也继续参与组合。MCP 与 LSP 是上游选择启用的扩展，可通过租户预设挂载，但不属于上游发布的 standard 默认目录。参见 [Web 组合决策](../../.agents/notes/implemented/architecture/2026-08-14-distributed-upstream-composition.md) 与[运行时一致性决策](../../.agents/notes/implemented/architecture/2026-08-14-distributed-runtime-parity.md)。
 
-租户管理员通过“设置 → 模型”完成模型配置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API 或 OpenAI-compatible Chat Completions，然后填写默认模型、Base URL 和可选的 API Key。早期的分布式快捷入口已经移除，上游设置页是唯一的 UI 所有者；`GET` 与 `PUT /admin/model-config` 仍为自动化和向后兼容保留。OpenAI-compatible 模式既接受 `https://api.openai.com/v1` 这样的根地址，也接受完整的 `/chat/completions` 地址；后者会被规范化为根地址。通用 UI 设置、模型设置、凭据引用与 agent 预设默认值均按租户隔离，修订号通过比较并设置方式写入。凭据值使用 AES-256-GCM 加密后存入 PostgreSQL，接口永不回显。每个 Worker 会在命令开始前解析对应租户的配置快照，因此不会通过进程全局环境变量串用密钥。
+租户管理员通过“设置 → 模型”完成模型配置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API 或 OpenAI-compatible Chat Completions，然后填写默认模型、Base URL 和可选的 API Key。上游设置页是唯一的 UI 所有者；`GET` 与 `PUT /admin/model-config` 仍为自动化保留。OpenAI-compatible 模式既接受 `https://api.openai.com/v1` 这样的根地址，也接受完整的 `/chat/completions` 地址；后者会被规范化。设置与加密凭据均按租户隔离。Workspace 在启动执行上下文时解析配置；更新会立即回收空闲上下文，并在活跃命令结束后回收对应上下文，因此下一条命令会使用新配置，且不存在进程全局的租户密钥。
 
 OpenAI-compatible 模式会把上游 `@deepseek-ai/dsh-llm-pi-ai` Cordis 插件挂载到 `openai-compatible` provider 路由，并固定使用 `openai-completions` 协议。因此流式文本、原生工具调用、用量、结束原因、取消和错误转换均复用上游适配器，而不是在分布式应用中 fork 一份协议实现。配置的模型 id 会原样传给端点；不要求认证的本地网关可以将密钥留空。
 
@@ -70,7 +71,7 @@ docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compo
 - `/api/workspace.*` 管理租户隔离的逻辑工作区、手动排序、会话归属和归档状态。
 - `/api/session.*`、`/api/host.describe` 以及 `/api/events.mux`、`/api/events.host` WebSocket 构成原生 Web 客户端兼容层。
 - `/api/settings.*` 与 `/api/credentials.*` 提供受修订号约束的租户设置和只写加密凭据。
-- `/api/commands/*`、`/api/goals/*`、`/api/agentPreset.*`、`/api/messageFeedback/*`、`/api/skill.list` 与 `/api/pluginInventory/list` 支撑相应的上游 Web 插件。
+- `/api/commands/*`、`/api/goals/*`、`/api/agentPreset.*`、`/api/messageFeedback/*`、`/api/skill.list`、`/api/subagent.*`、`/api/pluginInventory/list` 与 `/api/dynamicCordisRunner/*` 支撑相应的上游 Web 插件。
 - `POST /v1/sessions` 创建租户所有的会话。
 - `GET /v1/sessions` 和 `GET /v1/sessions/:id` 读取当前用户所有的会话。
 - `POST /v1/sessions/:id/messages` 创建可幂等认领的命令并返回 `202`。
@@ -88,17 +89,16 @@ Worker 同时更新 Redis Worker 心跳和活跃命令心跳。API 泵会在两�
 
 ## 限制
 
-- MVP 为每条命令创建新的 Harness 运行时，没有保留粘性的长生命周期 Session Actor；它优先保证故障转移简单，而不是最低延迟。
+- 单例 Workspace 会保留 Agent handle、后台任务、可继续子 Agent、工作流与动态 Cordis 状态；重启时从 PostgreSQL 恢复持久会话，但会结束进程本地工作。
 - 进程崩溃遗留的 Redis pending 项尚未通过 `XAUTOCLAIM` 压缩；SQL 恢复会创建新的可调度项，因此长时间运行的部署还需要 pending 回收和 Stream 裁剪。
 - 陈旧命令超时是粗粒度的租约策略。生产部署需要按工作负载配置截止时间、重试分类、毒性命令处理和死信流程。
-- 交互式审批与提问、分布式 subagent 与工作流所有权、MCP 服务生命周期、实时 Cordis 插件重配置、Web 搜索、LSP、租户配额、审计日志、用户邀请/管理、密码找回、MFA 和 PostgreSQL 行级安全尚未由分布式适配器实现。其上游客户端视图可能展示持久事件或空状态；不支持的修改会明确失败。静态部署仍会提供上游 HMR 客户端所需的空闲 SSE 端点，并接受动态 Cordis 的检查器目录同步与空清单读取握手，使这些有意为空的视图不会产生传输错误。
+- 租户配额、审计日志、用户邀请/管理、密码找回、MFA 和 PostgreSQL 行级安全仍属于生产化工作。MCP 与 LSP 是上游选择启用的组合包，而不是缺失的默认工具；使用它们需要租户预设和相应外部服务配置。
 - 共享持久文件、工作区 skill、上游文件/搜索/编辑/Bash/后台任务工具、目录浏览、会话重命名与 fork 以及附件元数据已经实现。仓库克隆生命周期、浏览器上传下载、向模型传递图片内容和交付物存储仍需要分布式所有权。
 - 单个 Workspace 容器是一个共享信任边界。RPC 路径检查可以阻止普通文件/搜索/编辑器路径穿越，但任意 Bash 命令刻意保留了强能力并可检查容器；该拓扑提供逻辑租户路由，而不是面向互不信任租户的硬沙箱。需要强租户隔离时，应按信任域使用独立容器或微虚拟机。
-- 后台任务可跨 Worker 命令运行时继续存在，但不能跨 Workspace 服务重启；远程任务完成也尚不能自动唤醒空闲 Agent，模型可以在后续轮次通过 `job_output` 收集已知任务。
-- 队列编辑接受上游 RPC，但尚不能对每条命令创建的实时 agent actor 进行 steering；必须等运行中的轮次结束或将其取消，API 才能写入模式切换等自身拥有的会话事件。subagent 历史/提示/中断操作仍不受支持，在分布式子会话存在之前其目录会正确保持为空。
+- 后台任务可跨 Worker 变更继续存在，但不能跨 Workspace 服务重启。队列编辑仍不能 steering 已由 Redis 认领的命令；必须取消或等待该轮结束，再执行 API 所有的模式切换。
 - 浏览器登录和租户隔离已经可用，但生产运维仍需 TLS、入口 Cookie `Secure` 策略、更广泛跨域场景下的 CSRF 加固、会话撤销管理、限流，以及按需接入外部身份提供方。
 - SSE 实现会轮询 PostgreSQL，保持刻意简化；生产 fan-out 应把已提交事件通知作为加速路径，同时保留按序列号从数据库追赶的能力。
 
 ## 模型体验
 
-分布式层不会向模型暴露租户、Redis、Worker 或 Workspace RPC 协议。模型仍然只看到普通 Harness 系统提示、持久会话历史、上游工具指引和已注册工具 schema。Worker 侧定义是透明 RPC 代理，其成功调用的模型可见内容来自 Workspace 服务中的原始工具渲染器。确定性测试适配器调用 `worker_probe` 或显式 Workspace 探针；官方 DeepSeek 与 OpenAI-compatible 模式接收同一套 Harness 上下文与工具契约。分布式元数据留在命令行和基础设施键中，不进入提示，因此单纯改变路由不会使模型前缀失效。
+分布式层不会向模型暴露租户、Redis、Worker 或 Workspace RPC 协议。模型请求与每一次工具调用都在上游 Workspace 组合中运行；Worker 不会替换 schema 或模型可见结果。官方 DeepSeek 与 OpenAI-compatible 模式接收相同的 Harness 上下文与预设契约。分布式元数据留在命令行和基础设施键中，不进入提示，因此单纯改变路由不会使模型前缀失效。

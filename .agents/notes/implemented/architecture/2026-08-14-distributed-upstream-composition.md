@@ -18,7 +18,7 @@ Each Worker command composes the upstream Agent loop, session persistence and ch
 
 One internal Workspace container owns the persistent volume and runs the upstream filesystem, search, editor, Bash, subprocess, and background-job providers. Workers expose those schemas through ordinary Harness tool registrations and forward execution with tenant, workspace, and permission identity. Workspace-local `.dsh/skills` and `.agents/skills` directories supply the skill catalog and instruction bodies. This is a deployment ownership adapter: it does not fork the model-facing tool schemas or renderers.
 
-Client composition parity does not assert runtime parity for capabilities that need a distributed owner. Interactive approvals and user questions, subagent and workflow execution, MCP server lifecycle, live Cordis plugin reconfiguration, Web search, LSP, and hard sandbox isolation remain unavailable until a tenant-scoped control plane and durable cross-process protocol exist for each one. Their upstream client plugins may render durable events produced elsewhere or an empty state, but the API returns an explicit failure for unsupported mutations instead of pretending that an operation succeeded. Read-only boot handshakes are the narrow exception: the static deployment keeps the upstream HMR EventSource connected to an idle SSE channel, accepts the client inspect-provider manifest, and returns an empty dynamic Cordis inventory. These compatibility reads claim no dynamic execution owner and prevent a supported empty state from surfacing as a transport error.
+This note's staged decision to leave runtime-owned capabilities behind explicit failures is superseded by [Upstream runtime parity in the singleton Workspace](2026-08-14-distributed-runtime-parity.md). This note continues to own browser-composition discovery and the tenant-aware Web protocol; the later note owns Agent, tool, interaction, subagent, workflow, Cordis, and preset execution.
 
 ## Verification
 
@@ -32,7 +32,7 @@ Client composition parity does not assert runtime parity for capabilities that n
 
 **Fork upstream client plugins for the distributed API.** Rejected because it duplicates UI behavior and wire shapes. The distributed boundary adapts Host RPC ownership while the upstream clients remain the presentation authority.
 
-**Claim every visible upstream plugin as supported.** Rejected because client code is not the owner of execution semantics. Cross-process approvals, subagents, MCP, and workflows require explicit durable protocols; empty or explicit unsupported behavior is safer than a control that loses state or crosses tenants.
+**Claim every visible upstream plugin as supported before it has an execution owner.** Rejected because client code is not the owner of execution semantics. The later runtime-parity decision adds the missing owners rather than weakening this requirement.
 
 ## Consequences
 
@@ -40,4 +40,4 @@ Client composition parity does not assert runtime parity for capabilities that n
 - Upstream client composition changes are discovered automatically, while a new server capability still requires a deliberate tenant-aware adapter and an e2e assertion.
 - PostgreSQL and Redis remain the distributed truth and scheduling layers; Cordis remains the composition and extension mechanism inside Worker and Workspace processes.
 - The shared Workspace container favors simple file continuity across Workers. Bash has the power of that container and therefore provides logical routing, not a security boundary between hostile tenants.
-- The unsupported capability list is part of the contract. Adding one requires choosing its durable owner rather than mounting an in-process plugin whose state disappears on the next Worker command.
+- Server capabilities still require an explicit tenant-aware owner; the runtime-parity decision supplies those owners for the official preset and browser surfaces.

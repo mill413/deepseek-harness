@@ -41,6 +41,18 @@ interface RemoteEnvelope {
   value: unknown
 }
 
+/** Complete command envelope delegated by a queue Worker to the execution host. */
+export interface WorkspaceAgentCommand {
+  tenantId: string
+  workspaceId: string
+  sessionId: string
+  provider: string
+  model: string
+  agentPreset: string
+  permissionPreset: string
+  payload: { text?: string; action?: 'compact' }
+}
+
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -67,6 +79,48 @@ async function post(path: string, body: unknown, signal?: AbortSignal): Promise<
     ...signal === undefined ? {} : { signal },
   })
   return responseJson(response)
+}
+
+/** Execute one queued Agent command in the long-lived shared execution host. */
+export async function executeWorkspaceAgentCommand(command: WorkspaceAgentCommand, signal?: AbortSignal): Promise<string> {
+  const value = record(await post('/internal/v1/agents/execute', command, signal))
+  if (typeof value?.['finalText'] !== 'string') throw new Error('workspace service returned an invalid Agent result')
+  return value['finalText']
+}
+
+/** Cancel the live root Agent for one tenant session, if it is owned by the host. */
+export async function cancelWorkspaceAgent(tenantId: string, sessionId: string): Promise<void> {
+  await post('/internal/v1/agents/cancel', { tenantId, sessionId })
+}
+
+/** Invoke one browser-facing dynamic Cordis method on its owning Workspace runtime. */
+export async function workspaceDynamicCordisRpc(
+  tenantId: string,
+  method: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  return post('/internal/v1/dynamic-cordis', { tenantId, method, args })
+}
+
+/** Use the official subagent registry in the owning long-lived Workspace runtime. */
+export async function workspaceSubagentRpc(
+  tenantId: string,
+  workspaceId: string,
+  operation: 'list' | 'prompt' | 'interrupt',
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return post('/internal/v1/subagents', { tenantId, workspaceId, operation, args }, signal)
+}
+
+/** Retire one tenant's cached model/search adapters after a settings or credential change. */
+export async function invalidateWorkspaceTenant(tenantId: string): Promise<void> {
+  await post('/internal/v1/runtime/invalidate', { tenantId })
+}
+
+/** Read the real upstream Cordis Loader inventory for one tenant workspace. */
+export async function workspacePluginInventory(tenantId: string, workspaceId: string): Promise<unknown> {
+  return post('/internal/v1/plugin-inventory', { tenantId, workspaceId })
 }
 
 function parseCatalog(value: unknown): WorkspaceCatalog {

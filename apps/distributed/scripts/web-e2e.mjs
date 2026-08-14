@@ -234,7 +234,7 @@ assert.equal(models.current.model, description.model)
 await rpc('session.prompt', {
   sessionId,
   mode: 'queue',
-  content: [{ type: 'text', text: 'Authenticated multi-tenant Web API worker probe' }],
+  content: [{ type: 'text', text: '[workspace-e2e] Authenticated multi-tenant Web API worker probe' }],
   clientTimeZone: 'Asia/Shanghai',
 })
 

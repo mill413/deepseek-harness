@@ -1,36 +1,7 @@
-import { randomUUID } from 'node:crypto'
-import { Context } from '@deepseek-ai/cordis'
-import { getOrCreateAnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
-import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
-import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
-import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
-import LlmRuntime, {
-  CallId,
-  createUserMessage,
-  LlmAdapter,
-  LlmError,
-  type GenerateOptions,
-  type LlmResolvedModelInfo,
-  type StreamChunk,
-} from '@deepseek-ai/dsh-llm'
-import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
-import PlanMode from '@deepseek-ai/dsh-plan-mode'
-import SessionStore, { type SessionEvent } from '@deepseek-ai/dsh-session'
-import { apply as checkpointPolicy, inject as checkpointInject } from '@deepseek-ai/dsh-session-checkpoint-policy'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { config } from './config.ts'
 import { migrate, one, pool, tx } from './db.ts'
-import { internalSessionId } from './identity.ts'
-import { tenantModelConfig, type TenantModelConfig } from './model-config.ts'
-import * as OpenAiCompatible from './openai-compatible.ts'
-import PostgresSessionPersistence from './postgres-persistence.ts'
 import { connectRedis, ensureGroup, type RedisClient } from './redis.ts'
-import { settingValue } from './settings.ts'
-import * as WorkerExtensions from './worker-extensions.ts'
-import { workspaceRootPath } from './workspace-path.ts'
+import { cancelWorkspaceAgent, executeWorkspaceAgentCommand } from './workspace-client.ts'
 
 interface Command {
   tenant_id: string
@@ -78,178 +49,6 @@ function parseStreamBatches(value: unknown): StreamBatch[] | null {
   })
 }
 
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted === true) {
-      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
-      return
-    }
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer)
-      reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
-    }, { once: true })
-  })
-}
-
-function textChunks(text: string): StreamChunk[] {
-  return [
-    { type: 'block-start', index: 0, blockType: 'text' },
-    { type: 'text-delta', index: 0, text },
-    { type: 'block-end', index: 0, block: { type: 'text', text } },
-    { type: 'usage', usage: { inputTokens: 10, outputTokens: text.length } },
-    { type: 'finish', reason: { kind: 'stop' } },
-  ]
-}
-
-function toolChunks(callId: string, name = 'worker_probe', input: unknown = { input: 'distributed probe' }): StreamChunk[] {
-  const id = CallId(callId)
-  const args = JSON.stringify(input)
-  return [
-    { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: args },
-    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: args } },
-    { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
-    { type: 'finish', reason: { kind: 'tool-calls' } },
-  ]
-}
-
-function todoChunks(callId: string): StreamChunk[] {
-  return toolChunks(callId, 'todo_write', {
-    todos: [
-      { content: 'Verify upstream plugin adaptation', status: 'completed' },
-    ],
-  })
-}
-
-class DistributedMockAdapter extends LlmAdapter {
-  private calls = 0
-
-  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({ provider, id: model, name: model, contextWindow: 16_384 })
-  }
-
-  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    await delay(config.mockDelayMs, options.signal)
-    if (options.purpose === 'compaction') {
-      for (const chunk of textChunks('Earlier turns verified the distributed Web API, settings, permissions, goals, feedback, and shared workspace.')) {
-        options.signal?.throwIfAborted()
-        yield chunk
-      }
-      return
-    }
-    const last = options.messages.at(-1)
-    const hasToolResult = last?.content.some(block => block.type === 'tool-result') === true
-    const requestsWorkspaceProbe = last?.content.some(block =>
-      block.type === 'text' && block.text.includes('[workspace-e2e]')) === true
-    const requestsTodoProbe = last?.content.some(block =>
-      block.type === 'text' && block.text.includes('[todo-e2e]')) === true
-    const chunks = hasToolResult
-      ? textChunks(`completed by ${config.workerId}`)
-      : requestsWorkspaceProbe
-        ? toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`, 'bash', {
-          command: 'printf workspace-proxy-ok > worker-proxy.txt && pwd && printf workspace-proxy-ok',
-          description: 'Verify shared workspace proxy execution',
-        })
-        : requestsTodoProbe
-          ? todoChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
-          : toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
-    for (const chunk of chunks) {
-      options.signal?.throwIfAborted()
-      yield chunk
-    }
-  }
-}
-
-function finalAssistantText(events: readonly SessionEvent[]): string {
-  const event = events.findLast(candidate => candidate.type === 'assistant/message')
-  if (event?.type !== 'assistant/message') return ''
-  return event.data.message.content
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('')
-}
-
-const PLAN_GUIDANCE = [
-  'You are in plan mode. Explore with non-mutating reads and produce a decision-complete implementation plan.',
-  'Do not edit files or execute the plan until the user leaves plan mode.',
-  'Use exit_plan_mode to present the complete markdown plan for review when the review channel is available.',
-].join(' ')
-
-async function buildHarness(
-  modelConfig: TenantModelConfig,
-  tenantId: string,
-  workspaceId: string,
-  agentPreset: string,
-  permissionPreset: string,
-): Promise<Context> {
-  const ctx = new Context()
-  const agentLoopSettings = record(await settingValue(tenantId, modelConfig, 'agent-loop'))
-  const maxParallelToolCalls = agentLoopSettings?.['maxParallelToolCalls']
-  await ctx.plugin(LlmRuntime)
-  await ctx.plugin(SessionStore)
-  await ctx.plugin(SystemPrompt, {})
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
-  if (agentPreset !== 'minimal') {
-    await ctx.plugin(TokenMeter, {})
-    await ctx.plugin(ToolResultPruner, { thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
-    await ctx.plugin(BasicCompaction, {})
-    await ctx.plugin(PlanMode, { section: PLAN_GUIDANCE })
-  }
-  await ctx.plugin(AgentRegistry)
-  await ctx.plugin(AgentLoop, {
-    agents: [],
-    ...(typeof maxParallelToolCalls === 'number' ? { maxParallelToolCalls } : {}),
-  })
-  await ctx.plugin(PostgresSessionPersistence)
-  await ctx.plugin({ name: 'session-checkpoint-policy', inject: [...checkpointInject], apply: checkpointPolicy })
-  await ctx.plugin(WorkerExtensions, { tenantId, workspaceId, permissionPreset })
-  ctx.llm.registerAdapter(['distributed-mock'], new DistributedMockAdapter())
-  if (modelConfig.mode === 'deepseek') {
-    const options = resolveAdapterOptions({
-      baseURL: modelConfig.baseUrl ?? config.deepSeekBaseUrl,
-      models: [{ id: modelConfig.defaultModel, name: modelConfig.defaultModel }],
-    })
-    ctx.llm.registerAdapter(['deepseek-official'], new DeepSeekAdapter({
-      options: () => options,
-      resolveApiKey: () => {
-        if (modelConfig.apiKey === null) {
-          throw new LlmError('No DeepSeek API key is configured for this tenant', 'MISSING_CREDENTIAL')
-        }
-        return Promise.resolve(modelConfig.apiKey)
-      },
-      resolveUserId: () => getOrCreateAnonymousUserId(),
-    }))
-  }
-  if (modelConfig.mode === 'openai') {
-    if (modelConfig.baseUrl === null) throw new Error('OpenAI-compatible mode requires a base URL')
-    await ctx.plugin(OpenAiCompatible, {
-      baseUrl: modelConfig.baseUrl,
-      model: modelConfig.defaultModel,
-      apiKey: modelConfig.apiKey,
-    })
-  }
-  ctx.tools.register(defineTool({
-    name: 'worker_probe',
-    description: 'Return the worker identity to verify native distributed tool execution.',
-    parameters: {
-      input: { type: 'string', required: true },
-    },
-    output: {
-      schema: {
-        type: 'object',
-        properties: { workerId: { type: 'string' }, input: { type: 'string' } },
-        additionalProperties: false,
-      },
-      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
-    },
-    execute(args) {
-      return Promise.resolve({ workerId: config.workerId, input: args.input })
-    },
-  }))
-  return ctx
-}
-
 async function acquireLease(redis: RedisClient, tenantId: string, sessionId: string, token: string): Promise<boolean> {
   const result = await redis.set(`dsh:lease:${tenantId}:${sessionId}`, token, {
     condition: 'NX',
@@ -290,8 +89,6 @@ async function requeue(command: Command): Promise<void> {
   `, [command.tenant_id, command.id])
 }
 
-const activeAgents = new Map<string, Agent>()
-
 async function executeCommand(redis: RedisClient, command: Command): Promise<void> {
   const leaseKey = `dsh:lease:${command.tenant_id}:${command.session_id}`
   const leaseToken = `${config.workerId}:${command.id}`
@@ -326,55 +123,24 @@ async function executeCommand(redis: RedisClient, command: Command): Promise<voi
     ]).catch((error: unknown) => { console.error('worker heartbeat failed', error) })
   }, config.heartbeatSeconds * 1000)
 
-  let ctx: Context | undefined
   try {
-    ctx = await buildHarness(
-      await tenantModelConfig(command.tenant_id),
-      command.tenant_id,
-      command.workspace_id,
-      command.agent_preset,
-      command.permission_preset,
-    )
-    const id = internalSessionId(command.tenant_id, command.session_id)
-    const handle = command.header === null
-      ? await ctx.agents.create({
-        sessionId: id,
-        meta: { cwd: workspaceRootPath(command.tenant_id, command.workspace_id) },
-        agentOptions: { provider: command.provider, model: command.model },
-      })
-      : await ctx.agents.resume({ resumeSessionId: id, agentOptions: { provider: command.provider, model: command.model } })
-    activeAgents.set(`${command.tenant_id}/${command.session_id}`, handle.agent)
-    let finalText: string
-    if (command.payload.action === 'compact') {
-      const compaction = ctx.get('compaction')
-      if (compaction === undefined) throw new Error('compaction is not enabled for this agent preset')
-      const result = await compaction.compactNow(handle.agent, new AbortController().signal)
-      finalText = result === null
-        ? 'No compactable history yet.'
-        : `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`
-    } else {
-      const prompt = command.payload.text
-      if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('message command has no text')
-      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
-      await handle.agent.whenIdle()
-      const turnEnd = handle.agent.session.events.findLast(event => event.type === 'turn/end')
-      if (turnEnd?.type === 'turn/end' && turnEnd.data.reason.kind === 'error') {
-        throw new Error(turnEnd.data.reason.error.message)
-      }
-      finalText = finalAssistantText(handle.agent.session.events)
-      if (finalText === '') throw new Error('agent completed without assistant text')
-    }
-    await ctx.sessions.flush(handle.agent.session)
+    const finalText = await executeWorkspaceAgentCommand({
+      tenantId: command.tenant_id,
+      workspaceId: command.workspace_id,
+      sessionId: command.session_id,
+      provider: command.provider,
+      model: command.model,
+      agentPreset: command.agent_preset,
+      permissionPreset: command.permission_preset,
+      payload: command.payload,
+    })
     await pool.query(`
       UPDATE agent_commands SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'completed' END,
         final_text = $4, heartbeat_at = now(), completed_at = now()
       WHERE tenant_id = $1 AND id = $2 AND status = 'running' AND worker_id = $3
     `, [command.tenant_id, command.id, config.workerId, finalText])
     await pool.query('UPDATE sessions SET status = \'idle\', updated_at = now() WHERE tenant_id = $1 AND id = $2', [command.tenant_id, command.session_id])
-    activeAgents.delete(`${command.tenant_id}/${command.session_id}`)
-    await handle.dispose()
   } catch (error) {
-    activeAgents.delete(`${command.tenant_id}/${command.session_id}`)
     console.error(`command ${command.id} failed`, error)
     await pool.query(`
       UPDATE agent_commands SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'failed' END,
@@ -384,7 +150,6 @@ async function executeCommand(redis: RedisClient, command: Command): Promise<voi
     await pool.query('UPDATE sessions SET status = \'failed\', updated_at = now() WHERE tenant_id = $1 AND id = $2', [command.tenant_id, command.session_id])
   } finally {
     clearInterval(heartbeat)
-    if (ctx !== undefined) await ctx.fiber.dispose().catch((error: unknown) => { console.error('harness disposal failed', error) })
     await releaseLease(redis, leaseKey, leaseToken)
   }
 }
@@ -397,7 +162,9 @@ const subscriber = await connectRedis()
 await subscriber.subscribe('dsh:agent:cancel', (raw) => {
   try {
     const message = JSON.parse(raw) as { tenantId: string; sessionId: string }
-    activeAgents.get(`${message.tenantId}/${message.sessionId}`)?.cancel({ kind: 'user' })
+    void cancelWorkspaceAgent(message.tenantId, message.sessionId).catch((error: unknown) => {
+      console.error('workspace cancellation failed', error)
+    })
   } catch (error) {
     console.error('invalid cancellation message', error)
   }
@@ -436,7 +203,6 @@ while (!stopping) {
 
 async function shutdown(): Promise<void> {
   stopping = true
-  for (const agent of activeAgents.values()) agent.cancel({ kind: 'disposed' })
   await subscriber.close()
   await redis.close()
   await pool.end()

@@ -73,7 +73,7 @@ assert.equal(denied.error, 'session not found')
 
 const submitted = await Promise.all(sessions.map((session, index) => request(apiUrl, `/v1/sessions/${session.id}/messages`, {
   method: 'POST',
-  body: JSON.stringify({ text: `distributed message ${index}` }),
+  body: JSON.stringify({ text: `[workspace-e2e] distributed message ${index}` }),
 }, 202)))
 const completed = await Promise.all(submitted.map(command => waitForCommand(apiUrl, command.id)))
 assert.ok(completed.every(command => command.status === 'completed'), JSON.stringify(completed))
@@ -98,7 +98,7 @@ const followupDone = await waitForCommand(apiUrl, followup.id)
 assert.equal(followupDone.status, 'completed')
 const resumed = await request(apiUrl, `/v1/sessions/${sessions[0].id}/events?afterSeq=-1`)
 assert.ok(resumed.events.length > firstEvents.events.length)
-assert.equal(resumed.events.filter(event => event.type === 'user/message').length, 2)
+assert.equal(resumed.events.filter(event => event.type === 'user/message' && event.data?.source?.kind === 'user').length, 2)
 assert.ok(resumed.events.some(event => event.type === 'todo/write'))
 assert.deepEqual(resumed.events.map(event => event.seq), Array.from({ length: resumed.events.length }, (_, seq) => seq))
 

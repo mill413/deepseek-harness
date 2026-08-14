@@ -33,7 +33,13 @@ import {
   writeSetting,
   type SettingsPathOperation,
 } from './settings.ts'
-import { workspaceCatalogFor } from './workspace-client.ts'
+import {
+  invalidateWorkspaceTenant,
+  workspaceCatalogFor,
+  workspaceDynamicCordisRpc,
+  workspacePluginInventory,
+  workspaceSubagentRpc,
+} from './workspace-client.ts'
 import { workspaceRootPath } from './workspace-path.ts'
 
 interface WebSocketConnection {
@@ -118,6 +124,15 @@ interface WorkspaceRow {
   updated_at: Date
 }
 
+interface PendingInteractionRow {
+  rpc_id: string
+  session_id: string
+  kind: 'question' | 'approval'
+  payload: Record<string, unknown>
+  status: 'pending' | 'resolved' | 'cancelled'
+  response: Record<string, unknown> | null
+}
+
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Uint8Array[] = []
   let size = 0
@@ -195,6 +210,56 @@ function rpcRequest(input: Record<string, unknown>, pathMethod: string): RpcRequ
   return input as unknown as RpcRequestEnvelope
 }
 
+async function respondToInteraction(auth: Identity, input: Record<string, unknown>): Promise<Record<string, unknown>> {
+  if (input['type'] !== 'client-response' || typeof input['rpcId'] !== 'string') {
+    throw new HttpError(400, 'invalid RPC response envelope')
+  }
+  const rpcId = assertUuid(input['rpcId'], 'rpcId')
+  const interaction = await one<PendingInteractionRow>(
+    `SELECT p.rpc_id, p.session_id, p.kind, p.payload, p.status, p.response
+     FROM pending_interactions p
+     JOIN sessions s ON s.tenant_id = p.tenant_id AND s.id = p.session_id
+     WHERE p.tenant_id = $1 AND p.rpc_id = $2 AND s.owner_user_id = $3`,
+    [auth.tenantId, rpcId, auth.userId],
+  )
+  if (interaction === undefined || interaction.status !== 'pending') {
+    return { accepted: false, reason: 'not-pending' }
+  }
+  const result = settingsRecord(input['result'])
+  let responseValue: Record<string, unknown>
+  if (interaction.kind === 'question') {
+    if (result['ok'] === false) {
+      const error = settingsRecord(result['error'])
+      if (error['code'] !== 'cancelled') return { accepted: false, reason: 'bad-response' }
+      responseValue = { cancelled: true }
+    } else {
+      const value = settingsRecord(result['value'])
+      if (value['sessionId'] !== interaction.session_id) return { accepted: false, reason: 'bad-response' }
+      const answer = settingsRecord(value['answer'])
+      if (!Array.isArray(answer['answers'])) return { accepted: false, reason: 'bad-response' }
+      responseValue = { answer }
+    }
+  } else {
+    if (result['ok'] !== true) return { accepted: false, reason: 'bad-response' }
+    const value = settingsRecord(result['value'])
+    const outcome = value['outcome']
+    if (value['sessionId'] !== interaction.session_id
+      || value['approvalId'] !== interaction.payload['approvalId']
+      || !['allowed-once', 'rejected'].includes(String(outcome))) {
+      return { accepted: false, reason: 'bad-response' }
+    }
+    responseValue = { outcome }
+  }
+  const updated = await pool.query(
+    `UPDATE pending_interactions SET status = 'resolved', response = $3::jsonb, updated_at = now()
+     WHERE tenant_id = $1 AND rpc_id = $2 AND status = 'pending'`,
+    [auth.tenantId, rpcId, JSON.stringify(responseValue)],
+  )
+  return updated.rowCount === 1
+    ? { accepted: true }
+    : { accepted: false, reason: 'not-pending' }
+}
+
 function providerDisplayName(provider: string): string {
   if (provider === 'deepseek-official') return 'DeepSeek'
   if (provider === 'openai-compatible') return 'OpenAI-compatible Chat Completions'
@@ -247,6 +312,30 @@ async function ownedSession(tenantId: string, userId: string, sessionId: string)
   )
   if (row === undefined) throw new HttpError(404, 'session not found')
   return row
+}
+
+async function ownedSubagent(
+  auth: Identity,
+  parentSessionId: string,
+  childSessionId: string,
+  expectedMode?: 'one-shot' | 'continuable',
+): Promise<{ parent: SessionRow; child: SessionRow }> {
+  const [parent, child] = await Promise.all([
+    ownedSession(auth.tenantId, auth.userId, parentSessionId),
+    ownedSession(auth.tenantId, auth.userId, childSessionId),
+  ])
+  if (child.parent_session_id !== parentSessionId || child.workspace_id !== parent.workspace_id) {
+    throw new HttpError(404, 'subagent is not a direct child of this session')
+  }
+  if (expectedMode !== undefined) {
+    const descriptor = await one<{ mode: string | null }>(`
+      SELECT event->'data'->>'mode' AS mode FROM session_events
+      WHERE tenant_id = $1 AND session_id = $2 AND event->>'type' = 'subagent/descriptor'
+      ORDER BY seq LIMIT 1
+    `, [auth.tenantId, childSessionId])
+    if (descriptor?.mode !== expectedMode) throw new HttpError(409, `subagent is not ${expectedMode}`)
+  }
+  return { parent, child }
 }
 
 async function events(tenantId: string, sessionId: string, afterSeq: number): Promise<unknown[]> {
@@ -328,7 +417,7 @@ async function createSession(
       agentPreset,
       ...(parentSessionId === undefined ? {} : { parentSession: internalSessionId(auth.tenantId, parentSessionId) }),
     }
-    await client.query(
+    const inserted = await client.query(
       `INSERT INTO sessions
          (tenant_id, id, owner_user_id, workspace_id, workspace_order, provider, model,
           agent_preset, permission_preset, parent_session_id, header)
@@ -348,6 +437,29 @@ async function createSession(
         JSON.stringify(header),
       ],
     )
+    if (inserted.rowCount === 1) {
+      const time = Date.now()
+      const initialEvents = [
+        { type: 'agent-preset/selected', seq: 0, time, data: { agentPreset } },
+        { type: 'sandbox/mode', seq: 1, time, data: { mode: permissionPreset } },
+        {
+          type: 'approval/policy',
+          seq: 2,
+          time,
+          data: { policy: permissionPreset === 'danger-full-access' ? 'never' : 'ask' },
+        },
+      ]
+      for (const event of initialEvents) {
+        await client.query(
+          'INSERT INTO session_events (tenant_id, session_id, seq, event) VALUES ($1, $2, $3, $4::jsonb)',
+          [auth.tenantId, id, event.seq, JSON.stringify(event)],
+        )
+      }
+      await client.query(
+        'UPDATE sessions SET revision = revision + 1 WHERE tenant_id = $1 AND id = $2',
+        [auth.tenantId, id],
+      )
+    }
   })
   return ownedSession(auth.tenantId, auth.userId, id)
 }
@@ -407,7 +519,7 @@ async function appendSessionEvent(
   type: string,
   data: Record<string, unknown>,
 ): Promise<number> {
-  return tx(async (client) => {
+  const seq = await tx(async (client) => {
     const locked = await client.query<{
       id: string
       header: Record<string, unknown> | null
@@ -457,6 +569,10 @@ async function appendSessionEvent(
     )
     return seq
   })
+  // API-owned session events must retire retained Workspace snapshots before
+  // another command appends from the same sequence frontier.
+  await invalidateWorkspaceTenant(tenantId)
+  return seq
 }
 
 function normalizedTitle(value: unknown): string {
@@ -775,6 +891,83 @@ async function handleRpc(
         if (sessionId === undefined) throw new HttpError(400, 'sessionId is required')
         await ownedSession(auth.tenantId, auth.userId, sessionId)
         await cancelSession(redis, auth, sessionId)
+        return rpcSuccess(request.rpcId, { accepted: true })
+      }
+      case 'subagent.list': {
+        const parentSessionId = typeof payload['parentSessionId'] === 'string'
+          ? assertUuid(payload['parentSessionId'], 'parentSessionId')
+          : undefined
+        if (parentSessionId === undefined) throw new HttpError(400, 'parentSessionId is required')
+        const parent = await ownedSession(auth.tenantId, auth.userId, parentSessionId)
+        if (parent.workspace_id === null) return rpcSuccess(request.rpcId, { entries: [], parentAvailable: false })
+        return rpcSuccess(request.rpcId, await workspaceSubagentRpc(
+          auth.tenantId,
+          parent.workspace_id,
+          'list',
+          { parentSessionId },
+        ))
+      }
+      case 'subagent.history': {
+        const parentSessionId = typeof payload['parentSessionId'] === 'string'
+          ? assertUuid(payload['parentSessionId'], 'parentSessionId')
+          : undefined
+        const childSessionId = typeof payload['childSessionId'] === 'string'
+          ? assertUuid(payload['childSessionId'], 'childSessionId')
+          : undefined
+        const mode = payload['mode']
+        if (parentSessionId === undefined || childSessionId === undefined) {
+          throw new HttpError(400, 'parentSessionId and childSessionId are required')
+        }
+        if (mode !== 'one-shot' && mode !== 'continuable') throw new HttpError(400, 'subagent mode is invalid')
+        await ownedSubagent(auth, parentSessionId, childSessionId, mode)
+        const beforeSeq = typeof payload['beforeSeq'] === 'number' ? payload['beforeSeq'] : undefined
+        const result = await pool.query<{ event: unknown }>(`
+          SELECT event FROM session_events
+          WHERE tenant_id = $1 AND session_id = $2 AND ($3::bigint IS NULL OR seq < $3)
+          ORDER BY seq ASC LIMIT 1000
+        `, [auth.tenantId, childSessionId, beforeSeq ?? null])
+        const value: Record<string, unknown> = {
+          events: result.rows.map(row => ({ event: row.event })),
+          hasMore: false,
+        }
+        if (beforeSeq === undefined) value['projections'] = await sessionProjections(auth.tenantId, childSessionId)
+        return rpcSuccess(request.rpcId, value)
+      }
+      case 'subagent.prompt': {
+        const parentSessionId = typeof payload['parentSessionId'] === 'string'
+          ? assertUuid(payload['parentSessionId'], 'parentSessionId')
+          : undefined
+        const childSessionId = typeof payload['childSessionId'] === 'string'
+          ? assertUuid(payload['childSessionId'], 'childSessionId')
+          : undefined
+        if (parentSessionId === undefined || childSessionId === undefined) {
+          throw new HttpError(400, 'parentSessionId and childSessionId are required')
+        }
+        const { parent } = await ownedSubagent(auth, parentSessionId, childSessionId, 'continuable')
+        if (parent.workspace_id === null) throw new HttpError(409, 'subagent parent has no workspace')
+        const content = payload['content']
+        if (!Array.isArray(content)) throw new HttpError(400, 'content is required')
+        return rpcSuccess(request.rpcId, await workspaceSubagentRpc(
+          auth.tenantId,
+          parent.workspace_id,
+          'prompt',
+          { parentSessionId, childSessionId, content, rpcId: request.rpcId },
+        ))
+      }
+      case 'subagent.interrupt': {
+        const parentSessionId = typeof payload['parentSessionId'] === 'string'
+          ? assertUuid(payload['parentSessionId'], 'parentSessionId')
+          : undefined
+        const childSessionId = typeof payload['childSessionId'] === 'string'
+          ? assertUuid(payload['childSessionId'], 'childSessionId')
+          : undefined
+        if (parentSessionId === undefined || childSessionId === undefined) {
+          throw new HttpError(400, 'parentSessionId and childSessionId are required')
+        }
+        const { parent } = await ownedSubagent(auth, parentSessionId, childSessionId, 'continuable')
+        if (parent.workspace_id !== null) {
+          await workspaceSubagentRpc(auth.tenantId, parent.workspace_id, 'interrupt', { parentSessionId, childSessionId })
+        }
         return rpcSuccess(request.rpcId, { accepted: true })
       }
       case 'session.attachment': {
@@ -1296,6 +1489,7 @@ async function handleRpc(
           return rpcSuccess(request.rpcId, written)
         }
         const synchronized = await synchronizeModelSetting(auth.tenantId, auth.userId, modelConfig, namespace)
+        await invalidateWorkspaceTenant(auth.tenantId)
         const refreshed = (await describeSettings(auth.tenantId, synchronized))
           .find(candidate => candidate['ns'] === namespace)
         return rpcSuccess(request.rpcId, refreshed ?? written)
@@ -1309,11 +1503,13 @@ async function handleRpc(
       case 'credentials.set': {
         assertAdministrator(auth)
         await setCredential(auth.tenantId, auth.userId, modelConfig, payload['ref'], payload['value'])
+        await invalidateWorkspaceTenant(auth.tenantId)
         return rpcSuccess(request.rpcId, {})
       }
       case 'credentials.unset': {
         assertAdministrator(auth)
         await unsetCredential(auth.tenantId, auth.userId, modelConfig, payload['ref'])
+        await invalidateWorkspaceTenant(auth.tenantId)
         return rpcSuccess(request.rpcId, {})
       }
       case 'llm.providers':
@@ -1376,32 +1572,31 @@ async function handleRpc(
         })
         return rpcSuccess(request.rpcId, { models })
       }
-      case 'pluginInventory/list':
-        return rpcSuccess(request.rpcId, {
-          entries: [
-            ['api-gateway', '@deepseek-ai/dsh-distributed/api'],
-            ['postgres-session-persistence', '@deepseek-ai/dsh-distributed/postgres-persistence'],
-            ['redis-command-transport', '@deepseek-ai/dsh-distributed/redis'],
-            ['workspace-proxy', '@deepseek-ai/dsh-distributed/workspace-service'],
-            ['agent-loop', '@deepseek-ai/dsh-agent-loop'],
-            ['llm-deepseek', '@deepseek-ai/dsh-llm-deepseek'],
-            ['llm-pi-ai', '@deepseek-ai/dsh-llm-pi-ai'],
-            ['session-checkpoint-policy', '@deepseek-ai/dsh-session-checkpoint-policy'],
-            ['system-prompt', '@deepseek-ai/dsh-system-prompt'],
-            ['tools', '@deepseek-ai/dsh-tools'],
-          ].map(([entryId, moduleName]) => ({ entryId, moduleName, enabled: true, fiberPhase: 'active' })),
-        })
+      case 'pluginInventory/list': {
+        const workspace = (await workspaceRows(auth))[0]
+        if (workspace === undefined) return rpcSuccess(request.rpcId, { entries: [] })
+        return rpcSuccess(request.rpcId, await workspacePluginInventory(auth.tenantId, workspace.id))
+      }
       case 'dynamicCordisRunner/syncInspectManifest':
-        // The distributed runtime does not execute dynamic Cordis packages yet,
-        // but the complete upstream client still publishes its read-only inspect
-        // provider directory during boot. Accepting the snapshot keeps that
-        // compatibility handshake quiet without claiming execution support.
-        return rpcSuccess(request.rpcId, null)
       case 'dynamicCordisRunner/inventory':
-        // No distributed owner exists for dynamic package definitions. An empty
-        // successful inventory lets the upstream panel render its honest empty
-        // state; mutating runner methods continue to fail explicitly below.
-        return rpcSuccess(request.rpcId, [])
+      case 'dynamicCordisRunner/stopFromPanel':
+      case 'dynamicCordisRunner/undefineFromPanel':
+      case 'dynamicCordisRunner/runHostHalf':
+      case 'dynamicCordisRunner/getClientCode':
+      case 'dynamicCordisRunner/resolveRequestRun':
+      case 'dynamicCordisRunner/settleUserRun':
+      case 'dynamicCordisRunner/resolveInspectQuery':
+      case 'dynamicCordisRunner/reportRenderFailure':
+      case 'dynamicCordisRunner/reportClientGuardFailure':
+      case 'dynamicCordisRunner/invoke':
+        if (typeof remoteArgs['agentId'] === 'string') {
+          await ownedSession(auth.tenantId, auth.userId, assertUuid(remoteArgs['agentId'], 'agentId'))
+        }
+        return rpcSuccess(request.rpcId, await workspaceDynamicCordisRpc(
+          auth.tenantId,
+          request.method.slice('dynamicCordisRunner/'.length),
+          remoteArgs,
+        ))
       case 'messageFeedback/list':
       case 'messageFeedback/put':
       case 'messageFeedback/delete': {
@@ -1462,10 +1657,8 @@ async function handleRpc(
         `, [auth.tenantId, targetId, messageId, rating, note ?? null, version])
         return rpcSuccess(request.rpcId, { ok: true, value: feedbackView(updated as FeedbackRow) })
       }
-      case 'subagent.list':
-        return rpcSuccess(request.rpcId, { entries: [], parentAvailable: true })
       default:
-        return rpcFailure(request.rpcId, `${request.method} is not available in distributed Web phase 1`)
+        return rpcFailure(request.rpcId, `${request.method} is not supported by this Harness build`)
     }
   } catch (error) {
     return rpcFailure(request.rpcId, error instanceof Error ? error.message : String(error))
@@ -1611,6 +1804,7 @@ async function route(request: IncomingMessage, response: ServerResponse, redis: 
     }
     if (request.method === 'PUT') {
       const updated = await saveTenantModelConfig(auth.tenantId, auth.userId, modelConfigUpdate(await body(request)))
+      await invalidateWorkspaceTenant(auth.tenantId)
       send(response, 200, publicModelConfig(updated))
       return
     }
@@ -1619,6 +1813,10 @@ async function route(request: IncomingMessage, response: ServerResponse, redis: 
   if (rpcMatch !== null) {
     const method = rpcMatch[1] as string
     const input = await body(request)
+    if (method === 'respond') {
+      send(response, 200, await respondToInteraction(auth, input))
+      return
+    }
     const envelope = rpcRequest(input, method)
     send(response, 200, await handleRpc(redis, auth, envelope))
     return
@@ -1702,11 +1900,11 @@ async function route(request: IncomingMessage, response: ServerResponse, redis: 
   throw new HttpError(404, 'route not found')
 }
 
-function websocketFrame(socket: WebSocketConnection, payload: Record<string, unknown>): void {
+function websocketFrame(socket: WebSocketConnection, payload: Record<string, unknown>, rpcId: string = randomUUID()): void {
   if (socket.readyState !== WebSocketRuntime.OPEN) return
   socket.send(JSON.stringify({
     type: 'server-request',
-    rpcId: randomUUID(),
+    rpcId,
     method: payload['type'],
     payload,
   }))
@@ -1753,6 +1951,7 @@ function attachWebSockets(server: Server): WebSocketServerInstance {
         sockets.emit('connection', websocket, request)
         if (url.pathname === '/api/events.mux') {
           const cursors = new Map<string, number>()
+          const knownInteractions = new Map<string, PendingInteractionRow['status']>()
           let polling = false
           const poll = async (): Promise<void> => {
             if (polling || websocket.readyState !== WebSocketRuntime.OPEN) return
@@ -1776,6 +1975,48 @@ function attachWebSockets(server: Server): WebSocketServerInstance {
                   if (typeof event['seq'] === 'number') cursors.set(session.id, event['seq'])
                   websocketFrame(websocket, { type: 'session/event', sessionId: session.id, event })
                   await emitProjectionForEvent(websocket, auth.tenantId, session.id, event)
+                }
+              }
+              const interactions = await pool.query<PendingInteractionRow>(
+                `SELECT p.rpc_id, p.session_id, p.kind, p.payload, p.status, p.response
+                 FROM pending_interactions p
+                 JOIN sessions s ON s.tenant_id = p.tenant_id AND s.id = p.session_id
+                 WHERE p.tenant_id = $1 AND s.owner_user_id = $2
+                   AND (p.status = 'pending' OR p.updated_at > now() - interval '5 minutes')
+                 ORDER BY p.created_at`,
+                [auth.tenantId, auth.userId],
+              )
+              for (const interaction of interactions.rows) {
+                const previous = knownInteractions.get(interaction.rpc_id)
+                if (previous === undefined && interaction.status === 'pending') {
+                  knownInteractions.set(interaction.rpc_id, interaction.status)
+                  websocketFrame(websocket, {
+                    type: interaction.kind === 'question' ? 'question/requested' : 'approval/requested',
+                    sessionId: interaction.session_id,
+                    ...interaction.payload,
+                  }, interaction.rpc_id)
+                  continue
+                }
+                if (previous !== 'pending' || interaction.status === 'pending') continue
+                knownInteractions.set(interaction.rpc_id, interaction.status)
+                if (interaction.kind === 'question') {
+                  websocketFrame(websocket, {
+                    type: 'question/resolved',
+                    sessionId: interaction.session_id,
+                    questionRpcId: interaction.rpc_id,
+                    outcome: interaction.status === 'resolved' && interaction.response?.['cancelled'] !== true
+                      ? 'answered'
+                      : 'cancelled',
+                  })
+                } else {
+                  websocketFrame(websocket, {
+                    type: 'approval/resolved',
+                    sessionId: interaction.session_id,
+                    approvalId: interaction.payload['approvalId'],
+                    outcome: interaction.status === 'resolved'
+                      ? interaction.response?.['outcome'] ?? 'unavailable'
+                      : 'cancelled',
+                  })
                 }
               }
             } catch (error) {

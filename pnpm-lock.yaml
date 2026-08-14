@@ -358,24 +358,51 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../vendor/cordis
+      '@deepseek-ai/cordis-plugin-include':
+        specifier: workspace:^
+        version: link:../../vendor/include
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: workspace:^
+        version: link:../../vendor/loader
+      '@deepseek-ai/dsh':
+        specifier: workspace:^
+        version: link:../cli
       '@deepseek-ai/dsh-agent':
         specifier: workspace:^
         version: link:../../packages/core/agent
       '@deepseek-ai/dsh-agent-loop':
         specifier: workspace:^
         version: link:../../packages/core/agent-loop
+      '@deepseek-ai/dsh-agent-presets':
+        specifier: workspace:^
+        version: link:../../packages/preset/agent-presets
       '@deepseek-ai/dsh-anonymous-user-id':
         specifier: workspace:^
         version: link:../../packages/identity/anonymous-user-id
+      '@deepseek-ai/dsh-app-boot':
+        specifier: workspace:^
+        version: link:../../packages/boot/app-boot
+      '@deepseek-ai/dsh-base':
+        specifier: workspace:^
+        version: link:../../packages/bundle/base
       '@deepseek-ai/dsh-bash-local':
         specifier: workspace:^
         version: link:../../packages/shell/bash-local
+      '@deepseek-ai/dsh-cmdline':
+        specifier: workspace:^
+        version: link:../../packages/boot/cmdline
+      '@deepseek-ai/dsh-commands':
+        specifier: workspace:^
+        version: link:../../packages/interaction/commands
       '@deepseek-ai/dsh-compaction-basic':
         specifier: workspace:^
         version: link:../../packages/compaction/compaction-basic
       '@deepseek-ai/dsh-compaction-tool-result-pruner':
         specifier: workspace:^
         version: link:../../packages/compaction/compaction-tool-result-pruner
+      '@deepseek-ai/dsh-cordis-host-runner':
+        specifier: workspace:^
+        version: link:../../packages/extensions/cordis-host-runner
       '@deepseek-ai/dsh-credentials':
         specifier: workspace:^
         version: link:../../packages/credentials/credentials
@@ -412,6 +439,9 @@ importers:
       '@deepseek-ai/dsh-shell-env':
         specifier: workspace:^
         version: link:../../packages/shell/shell-env
+      '@deepseek-ai/dsh-subagent':
+        specifier: workspace:^
+        version: link:../../packages/subagent/subagent
       '@deepseek-ai/dsh-subprocess-local':
         specifier: workspace:^
         version: link:../../packages/subprocess/subprocess-local
@@ -445,6 +475,15 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: workspace:^
         version: link:../../packages/core/tools
+      '@deepseek-ai/dsh-user-approval':
+        specifier: workspace:^
+        version: link:../../packages/interaction/user-approval
+      '@deepseek-ai/dsh-user-questions':
+        specifier: workspace:^
+        version: link:../../packages/interaction/user-questions
+      '@deepseek-ai/dsh-web-app':
+        specifier: workspace:^
+        version: link:../../packages/bundle/web-app
       '@deepseek-ai/schemastery':
         specifier: link:../../vendor/schemastery
         version: link:../../vendor/schemastery

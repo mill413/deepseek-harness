@@ -1,4 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
 import { one, pool } from './db.ts'
 
 const SYSTEM_PRESETS_ROOT = new URL('../../cli/config/agent-presets/', import.meta.url)
@@ -133,4 +134,41 @@ export async function hasAgentPreset(tenantId: string, presetValue: unknown): Pr
   const user = await one<{ id: string }>('SELECT id FROM tenant_agent_presets WHERE tenant_id = $1 AND id = $2', [tenantId, id])
   if (user === undefined) throw new Error(`agent preset "${id}" was not found`)
   return id
+}
+
+async function writeIfChanged(path: string, content: string): Promise<void> {
+  try {
+    if (await readFile(path, 'utf8') === content) return
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+  await writeFile(path, content, { mode: 0o600 })
+}
+
+/** Materialize PostgreSQL-authored presets into the official filesystem roster consumed by the Workspace runtime. */
+export async function materializeAgentPresets(tenantId: string, root: string): Promise<void> {
+  await mkdir(root, { recursive: true, mode: 0o700 })
+  const result = await pool.query<UserPresetRow>(
+    'SELECT id, name, description, content FROM tenant_agent_presets WHERE tenant_id = $1 ORDER BY id',
+    [tenantId],
+  )
+  const expected = new Set(result.rows.map(row => row.id))
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (entry.isDirectory() && PRESET_ID_PATTERN.test(entry.name) && !expected.has(entry.name)) {
+      await rm(resolve(root, entry.name), { recursive: true, force: true })
+    }
+  }
+  for (const row of result.rows) {
+    const directory = resolve(root, row.id)
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const presetMetadata = [
+      `name: ${JSON.stringify(row.name ?? row.id)}`,
+      `description: ${JSON.stringify(row.description ?? '')}`,
+      '',
+    ].join('\n')
+    await Promise.all([
+      writeIfChanged(resolve(directory, 'agent.cordis.yml'), row.content),
+      writeIfChanged(resolve(directory, 'preset.yml'), presetMetadata),
+    ])
+  }
 }
