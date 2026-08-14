@@ -358,15 +358,24 @@ importers:
       '@deepseek-ai/cordis':
         specifier: workspace:^
         version: link:../../vendor/cordis
-      '@deepseek-ai/dsh-anonymous-user-id':
-        specifier: workspace:^
-        version: link:../../packages/identity/anonymous-user-id
       '@deepseek-ai/dsh-agent':
         specifier: workspace:^
         version: link:../../packages/core/agent
       '@deepseek-ai/dsh-agent-loop':
         specifier: workspace:^
         version: link:../../packages/core/agent-loop
+      '@deepseek-ai/dsh-anonymous-user-id':
+        specifier: workspace:^
+        version: link:../../packages/identity/anonymous-user-id
+      '@deepseek-ai/dsh-bash-local':
+        specifier: workspace:^
+        version: link:../../packages/shell/bash-local
+      '@deepseek-ai/dsh-fs-local':
+        specifier: workspace:^
+        version: link:../../packages/fs/fs-local
+      '@deepseek-ai/dsh-jobs-local':
+        specifier: workspace:^
+        version: link:../../packages/jobs/jobs-local
       '@deepseek-ai/dsh-llm':
         specifier: workspace:^
         version: link:../../packages/llm/llm
@@ -382,9 +391,33 @@ importers:
       '@deepseek-ai/dsh-session-persistence':
         specifier: workspace:^
         version: link:../../packages/session/session-persistence
+      '@deepseek-ai/dsh-shell-env':
+        specifier: workspace:^
+        version: link:../../packages/shell/shell-env
+      '@deepseek-ai/dsh-subprocess-local':
+        specifier: workspace:^
+        version: link:../../packages/subprocess/subprocess-local
       '@deepseek-ai/dsh-system-prompt':
         specifier: workspace:^
         version: link:../../packages/core/system-prompt
+      '@deepseek-ai/dsh-tool-bash':
+        specifier: workspace:^
+        version: link:../../packages/shell/tool-bash
+      '@deepseek-ai/dsh-tool-call-timeout-policy':
+        specifier: workspace:^
+        version: link:../../packages/guard/timeout-policy
+      '@deepseek-ai/dsh-tool-fs':
+        specifier: workspace:^
+        version: link:../../packages/fs/tool-fs
+      '@deepseek-ai/dsh-tool-fs-search':
+        specifier: workspace:^
+        version: link:../../packages/fs/tool-fs-search
+      '@deepseek-ai/dsh-tool-jobs':
+        specifier: workspace:^
+        version: link:../../packages/jobs/tool-jobs
+      '@deepseek-ai/dsh-tool-str-replace-editor':
+        specifier: workspace:^
+        version: link:../../packages/fs/tool-str-replace-editor
       '@deepseek-ai/dsh-tools':
         specifier: workspace:^
         version: link:../../packages/core/tools

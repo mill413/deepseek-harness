@@ -151,6 +151,21 @@ assert.ok(history.events.some(entry => entry.event.type === 'tool/call'))
 assert.ok(history.events.some(entry => entry.event.type === 'tool/result'))
 assert.ok(history.events.some(entry => entry.event.type === 'assistant/message'))
 
+await rpc('session.prompt', {
+  sessionId,
+  mode: 'queue',
+  content: [{ type: 'text', text: '[workspace-e2e] run the shared workspace proxy probe' }],
+  clientTimeZone: 'Asia/Shanghai',
+})
+const workspaceDeadline = Date.now() + 30_000
+let workspaceEvents = (await rpc('session.history', { sessionId, maxMessages: 100 })).events
+while (!JSON.stringify(workspaceEvents).includes('workspace-proxy-ok') && Date.now() < workspaceDeadline) {
+  await new Promise(resolve => setTimeout(resolve, 200))
+  workspaceEvents = (await rpc('session.history', { sessionId, maxMessages: 100 })).events
+}
+assert.match(JSON.stringify(workspaceEvents), /"name":"bash"/u)
+assert.match(JSON.stringify(workspaceEvents), /workspace-proxy-ok/u)
+
 const tenantACookie = cookie
 cookie = ''
 const tenantB = await jsonRequest('/auth/register', {

@@ -19,6 +19,9 @@ flowchart LR
   R --> W2[Worker 2]
   W1 --> P
   W2 --> P
+  W1 --> S[Workspace service]
+  W2 --> S
+  S --> V[(Persistent workspace volume)]
 ```
 
 浏览器用户使用租户标识、用户名和密码注册或登录。API 保存 scrypt 密码哈希与不透明浏览器会话哈希，并返回 HttpOnly、SameSite Cookie；该 Cookie 可通过任一 API 副本同时认证 HTTP 和 WebSocket 流量。Nginx 会清除调用方伪造的身份请求头。每条会话、命令和事件查询都包含已认证租户键，面向用户的会话操作还包含所有者键。直连端口仍保留 `x-tenant-id` 和 `x-user-id` 作为测试/服务身份适配器，不应暴露给不可信网络。
@@ -30,10 +33,13 @@ flowchart LR
 ```sh
 docker compose -f apps/distributed/docker-compose.yml up -d --build
 node apps/distributed/scripts/e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T workspace node apps/distributed/scripts/workspace-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=http://web api-1 node apps/distributed/scripts/web-e2e.mjs
 ```
 
-仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的逻辑“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与客户端插件图，并把经过认证的 HTTP RPC 与 WebSocket 流量负载均衡到两个 API；Web 容器本身不运行 Agent。API 1 还监听 `http://127.0.0.1:3101`，API 2 监听 `http://127.0.0.1:3102`。Web UI 支持基于工作区的会话列表与创建、持久历史、提示词、取消、实时事件、工具渲染、模型选择、退出登录和租户级模型管理。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，因此测试无需消耗模型额度，也能覆盖真实 Agent Loop、工具派发、检查点持久化、多 Worker 分配、租户隔离、跨 API 会话恢复和 Web–API 兼容协议。
+仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与客户端插件图，并把经过认证的 HTTP RPC 与 WebSocket 流量负载均衡到两个 API；Web 容器本身不运行 Agent。API 1 还监听 `http://127.0.0.1:3101`，API 2 监听 `http://127.0.0.1:3102`。Web UI 支持基于工作区的会话列表与创建、持久历史、提示词、取消、实时事件、工具渲染、模型选择、退出登录和租户级模型管理。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 Agent Loop、远程工具派发、检查点持久化、多 Worker 分配、租户隔离、跨 API 会话恢复和 Web–API 兼容协议。
+
+一个内部 Workspace 服务独占 `workspace-data` 卷。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。Worker 会为上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` 定义注册 RPC 代理，而原始上游实现在 Workspace 容器内执行。因此前台与后台 shell 进程、ripgrep 搜索和文件修改可在两个 Worker 之间共享同一个持久目录，并能跨 Workspace 服务重启保留。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
 
 租户管理员通常在右上角“模型配置”中完成设置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API，并填写默认模型、Base URL 和 API Key。API Key 使用 AES-256-GCM 加密后存入 PostgreSQL，接口永不回显。每个 Worker 会在命令开始前解析对应租户的配置快照，因此不会通过进程全局环境变量串用密钥。
 
@@ -81,11 +87,13 @@ Worker 同时更新 Redis Worker 心跳和活跃命令心跳。API 泵会在两�
 - 进程崩溃遗留的 Redis pending 项尚未通过 `XAUTOCLAIM` 压缩；SQL 恢复会创建新的可调度项，因此长时间运行的部署还需要 pending 回收和 Stream 裁剪。
 - 陈旧命令超时是粗粒度的租约策略。生产部署需要按工作负载配置截止时间、重试分类、毒性命令处理和死信流程。
 - 审批提示、交互式问题、分布式 subagent 所有权、租户配额、审计日志、用户邀请/管理、密码找回、MFA 和 PostgreSQL 行级安全不在此 MVP 范围内。
-- 逻辑工作区 CRUD 和排序已经实现，但工作区目前只是元数据：尚无共享文件系统、仓库签出、目录浏览器，也没有供 Agent 使用的文件系统或 shell 工具。
+- 共享持久文件以及上游文件/搜索/编辑/Bash/任务工具已经实现，但仓库克隆生命周期、上传下载、目录浏览器、附件和图片读取尚未在 Web UI 中开放。
+- 单个 Workspace 容器是一个共享信任边界。RPC 路径检查可以阻止普通文件/搜索/编辑器路径穿越，但任意 Bash 命令刻意保留了强能力并可检查容器；该拓扑提供逻辑租户路由，而不是面向互不信任租户的硬沙箱。需要强租户隔离时，应按信任域使用独立容器或微虚拟机。
+- 后台任务可跨 Worker 命令运行时继续存在，但不能跨 Workspace 服务重启；远程任务完成也尚不能自动唤醒空闲 Agent，模型可以在后续轮次通过 `job_output` 收集已知任务。
 - 兼容层仍不支持设置与凭据修改、会话重命名/分叉/附件、队列编辑、目标和 subagent 操作。会话搜索、技能与预设当前返回空目录；不支持的 RPC 会返回明确错误。
 - 浏览器登录和租户隔离已经可用，但生产运维仍需 TLS、入口 Cookie `Secure` 策略、更广泛跨域场景下的 CSRF 加固、会话撤销管理、限流，以及按需接入外部身份提供方。
 - SSE 实现会轮询 PostgreSQL，保持刻意简化；生产 fan-out 应把已提交事件通知作为加速路径，同时保留按序列号从数据库追赶的能力。
 
 ## 模型体验
 
-分布式层不会向模型暴露租户、Redis 或 Worker 协议。模型仍然只看到普通 Harness 系统提示、持久会话历史和已注册工具 schema。确定性测试适配器调用 `worker_probe`；官方 DeepSeek 模式接收同一套 Harness 上下文与工具契约。分布式元数据留在命令行和基础设施键中，不进入提示，因此单纯改变路由不会使模型前缀失效。
+分布式层不会向模型暴露租户、Redis、Worker 或 Workspace RPC 协议。模型仍然只看到普通 Harness 系统提示、持久会话历史、上游工具指引和已注册工具 schema。Worker 侧定义是透明 RPC 代理，其成功调用的模型可见内容来自 Workspace 服务中的原始工具渲染器。确定性测试适配器调用 `worker_probe` 或显式 Workspace 探针；官方 DeepSeek 模式接收同一套 Harness 上下文与工具契约。分布式元数据留在命令行和基础设施键中，不进入提示，因此单纯改变路由不会使模型前缀失效。

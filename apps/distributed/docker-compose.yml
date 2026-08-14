@@ -19,10 +19,15 @@ x-runtime: &runtime
     DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
     AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-604800}
     MODEL_CONFIG_ENCRYPTION_KEY: ${MODEL_CONFIG_ENCRYPTION_KEY:-distributed-local-development-key-change-me}
+    WORKSPACE_SERVICE_URL: http://workspace:3200
+    WORKSPACE_SERVICE_TOKEN: ${WORKSPACE_SERVICE_TOKEN:-distributed-local-workspace-token-change-me}
+    WORKSPACE_ROOT: /workspaces
   depends_on:
     postgres:
       condition: service_healthy
     redis:
+      condition: service_healthy
+    workspace:
       condition: service_healthy
   restart: unless-stopped
 
@@ -52,6 +57,24 @@ services:
       retries: 30
     volumes:
       - redis-data:/data
+    restart: unless-stopped
+
+  workspace:
+    build:
+      context: ../..
+      dockerfile: apps/distributed/Workspace.Dockerfile
+    command: ["node", "--import", "tsx", "apps/distributed/src/workspace-service.ts"]
+    environment:
+      WORKSPACE_PORT: "3200"
+      WORKSPACE_ROOT: /workspaces
+      WORKSPACE_SERVICE_TOKEN: ${WORKSPACE_SERVICE_TOKEN:-distributed-local-workspace-token-change-me}
+    volumes:
+      - workspace-data:/workspaces
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3200/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
     restart: unless-stopped
 
   api-1:
@@ -119,3 +142,4 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  workspace-data:

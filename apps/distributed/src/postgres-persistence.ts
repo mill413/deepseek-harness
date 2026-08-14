@@ -15,11 +15,13 @@ import SessionPersistence, {
 import type { PoolClient } from 'pg'
 import { pool, tx } from './db.ts'
 import { splitInternalSessionId } from './identity.ts'
+import { workspaceRootPath } from './workspace-path.ts'
 
 interface SessionRow {
   tenant_id: string
   id: string
   header: SessionHeader | null
+  workspace_id: string | null
   revision: string
 }
 
@@ -30,10 +32,15 @@ function revision(row: SessionRow): SessionPersistenceRevision {
 async function sessionRow(client: PoolClient, id: SessionId, lock = false): Promise<SessionRow | undefined> {
   const { tenantId, sessionId } = splitInternalSessionId(id)
   const result = await client.query<SessionRow>(
-    `SELECT tenant_id, id, header, revision FROM sessions WHERE tenant_id = $1 AND id = $2${lock ? ' FOR UPDATE' : ''}`,
+    `SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE tenant_id = $1 AND id = $2${lock ? ' FOR UPDATE' : ''}`,
     [tenantId, sessionId],
   )
-  return result.rows[0]
+  const row = result.rows[0]
+  if (row?.header === null || row === undefined || row.workspace_id === null) return row
+  return {
+    ...row,
+    header: { ...row.header, cwd: workspaceRootPath(row.tenant_id, row.workspace_id) },
+  }
 }
 
 /** PostgreSQL-backed Harness event log; API session rows become materialized on the first event append. */
@@ -156,16 +163,25 @@ export class PostgresSessionPersistence extends SessionPersistence implements Pe
 
   async list(signal?: AbortSignal): Promise<SessionHeader[]> {
     signal?.throwIfAborted()
-    const result = await pool.query<{ header: SessionHeader }>('SELECT header FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
+    const result = await pool.query<SessionRow>('SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
     signal?.throwIfAborted()
-    return result.rows.map(row => structuredClone(row.header))
+    return result.rows.flatMap(row => row.header === null ? [] : [{
+      ...structuredClone(row.header),
+      ...row.workspace_id === null ? {} : { cwd: workspaceRootPath(row.tenant_id, row.workspace_id) },
+    }])
   }
 
   async listSnapshots(signal?: AbortSignal): Promise<SessionPersistenceSnapshot[]> {
     signal?.throwIfAborted()
-    const result = await pool.query<SessionRow>('SELECT tenant_id, id, header, revision FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
+    const result = await pool.query<SessionRow>('SELECT tenant_id, id, header, workspace_id, revision FROM sessions WHERE header IS NOT NULL ORDER BY created_at')
     signal?.throwIfAborted()
-    return result.rows.flatMap(row => row.header === null ? [] : [{ header: structuredClone(row.header), revision: revision(row) }])
+    return result.rows.flatMap(row => row.header === null ? [] : [{
+      header: {
+        ...structuredClone(row.header),
+        ...row.workspace_id === null ? {} : { cwd: workspaceRootPath(row.tenant_id, row.workspace_id) },
+      },
+      revision: revision(row),
+    }])
   }
 
   private async readEvents(client: PoolClient, tenantId: string, sessionId: string, fromSeq: number): Promise<SessionEvent[]> {

@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-distributed",
-  "description": "Multi-tenant PostgreSQL and Redis API-worker deployment for DeepSeek Harness",
+  "description": "Multi-tenant PostgreSQL and Redis API-worker-workspace deployment for DeepSeek Harness",
   "version": "0.1.0-rc.5",
   "publishConfig": {
     "access": "public"
@@ -14,6 +14,7 @@
   "files": [
     "lib",
     "Dockerfile",
+    "Workspace.Dockerfile",
     "Web.Dockerfile",
     "docker-compose.yml",
     "migrations",
@@ -25,8 +26,10 @@
   "scripts": {
     "api": "node --import tsx src/api.ts",
     "worker": "node --import tsx src/worker.ts",
+    "workspace": "node --import tsx src/workspace-service.ts",
     "typecheck": "tsc -b tsconfig.json --pretty false",
     "test:e2e": "node scripts/e2e.mjs",
+    "test:workspace-e2e": "node scripts/workspace-e2e.mjs",
     "test:web-e2e": "node scripts/web-e2e.mjs"
   },
   "dependencies": {
@@ -34,12 +37,23 @@
     "@deepseek-ai/dsh-anonymous-user-id": "workspace:^",
     "@deepseek-ai/dsh-agent": "workspace:^",
     "@deepseek-ai/dsh-agent-loop": "workspace:^",
+    "@deepseek-ai/dsh-bash-local": "workspace:^",
+    "@deepseek-ai/dsh-fs-local": "workspace:^",
+    "@deepseek-ai/dsh-jobs-local": "workspace:^",
     "@deepseek-ai/dsh-llm": "workspace:^",
     "@deepseek-ai/dsh-llm-deepseek": "workspace:^",
     "@deepseek-ai/dsh-session": "workspace:^",
     "@deepseek-ai/dsh-session-checkpoint-policy": "workspace:^",
     "@deepseek-ai/dsh-session-persistence": "workspace:^",
+    "@deepseek-ai/dsh-shell-env": "workspace:^",
+    "@deepseek-ai/dsh-subprocess-local": "workspace:^",
     "@deepseek-ai/dsh-system-prompt": "workspace:^",
+    "@deepseek-ai/dsh-tool-bash": "workspace:^",
+    "@deepseek-ai/dsh-tool-fs": "workspace:^",
+    "@deepseek-ai/dsh-tool-fs-search": "workspace:^",
+    "@deepseek-ai/dsh-tool-jobs": "workspace:^",
+    "@deepseek-ai/dsh-tool-call-timeout-policy": "workspace:^",
+    "@deepseek-ai/dsh-tool-str-replace-editor": "workspace:^",
     "@deepseek-ai/dsh-tools": "workspace:^",
     "pg": "8.22.0",
     "redis": "6.1.0",

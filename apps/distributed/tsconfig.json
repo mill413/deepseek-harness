@@ -10,12 +10,23 @@
     { "path": "../../packages/identity/anonymous-user-id" },
     { "path": "../../packages/core/agent" },
     { "path": "../../packages/core/agent-loop" },
+    { "path": "../../packages/shell/bash-local" },
+    { "path": "../../packages/fs/fs-local" },
+    { "path": "../../packages/jobs/jobs-local" },
     { "path": "../../packages/llm/llm" },
     { "path": "../../packages/llm/llm-deepseek" },
     { "path": "../../packages/core/session" },
     { "path": "../../packages/session/session-checkpoint-policy" },
     { "path": "../../packages/session/session-persistence" },
+    { "path": "../../packages/shell/shell-env" },
+    { "path": "../../packages/subprocess/subprocess-local" },
     { "path": "../../packages/core/system-prompt" },
+    { "path": "../../packages/shell/tool-bash" },
+    { "path": "../../packages/fs/tool-fs" },
+    { "path": "../../packages/fs/tool-fs-search" },
+    { "path": "../../packages/jobs/tool-jobs" },
+    { "path": "../../packages/guard/timeout-policy" },
+    { "path": "../../packages/fs/tool-str-replace-editor" },
     { "path": "../../packages/core/tools" }
   ]
 }

@@ -23,6 +23,8 @@ import { internalSessionId } from './identity.ts'
 import { tenantModelConfig, type TenantModelConfig } from './model-config.ts'
 import PostgresSessionPersistence from './postgres-persistence.ts'
 import { connectRedis, ensureGroup, type RedisClient } from './redis.ts'
+import { registerWorkspaceTools } from './workspace-client.ts'
+import { workspaceRootPath } from './workspace-path.ts'
 
 interface Command {
   tenant_id: string
@@ -34,6 +36,7 @@ interface Command {
   provider: string
   model: string
   header: unknown
+  workspace_id: string
 }
 
 interface StreamBatch {
@@ -91,13 +94,13 @@ function textChunks(text: string): StreamChunk[] {
   ]
 }
 
-function toolChunks(callId: string): StreamChunk[] {
+function toolChunks(callId: string, name = 'worker_probe', input: unknown = { input: 'distributed probe' }): StreamChunk[] {
   const id = CallId(callId)
-  const args = JSON.stringify({ input: 'distributed probe' })
+  const args = JSON.stringify(input)
   return [
     { type: 'block-start', index: 0, blockType: 'tool-call' },
-    { type: 'tool-call-delta', index: 0, id, name: 'worker_probe', argumentsDelta: args },
-    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name: 'worker_probe', arguments: args } },
+    { type: 'tool-call-delta', index: 0, id, name, argumentsDelta: args },
+    { type: 'block-end', index: 0, block: { type: 'tool-call', id, name, arguments: args } },
     { type: 'usage', usage: { inputTokens: 10, outputTokens: 5 } },
     { type: 'finish', reason: { kind: 'tool-calls' } },
   ]
@@ -114,9 +117,16 @@ class DistributedMockAdapter extends LlmAdapter {
     await delay(config.mockDelayMs, options.signal)
     const last = options.messages.at(-1)
     const hasToolResult = last?.content.some(block => block.type === 'tool-result') === true
+    const requestsWorkspaceProbe = last?.content.some(block =>
+      block.type === 'text' && block.text.includes('[workspace-e2e]')) === true
     const chunks = hasToolResult
       ? textChunks(`completed by ${config.workerId}`)
-      : toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
+      : requestsWorkspaceProbe
+        ? toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`, 'bash', {
+          command: 'printf workspace-proxy-ok > worker-proxy.txt && pwd && printf workspace-proxy-ok',
+          description: 'Verify shared workspace proxy execution',
+        })
+        : toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
     for (const chunk of chunks) {
       options.signal?.throwIfAborted()
       yield chunk
@@ -133,7 +143,7 @@ function finalAssistantText(events: readonly SessionEvent[]): string {
     .join('')
 }
 
-async function buildHarness(modelConfig: TenantModelConfig): Promise<Context> {
+async function buildHarness(modelConfig: TenantModelConfig, tenantId: string, workspaceId: string): Promise<Context> {
   const ctx = new Context()
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
@@ -143,6 +153,7 @@ async function buildHarness(modelConfig: TenantModelConfig): Promise<Context> {
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(PostgresSessionPersistence)
   await ctx.plugin({ name: 'session-checkpoint-policy', inject: [...checkpointInject], apply: checkpointPolicy })
+  await registerWorkspaceTools(ctx, tenantId, workspaceId)
   ctx.llm.registerAdapter(['distributed-mock'], new DistributedMockAdapter())
   if (modelConfig.mode === 'deepseek') {
     const options = resolveAdapterOptions({
@@ -151,11 +162,11 @@ async function buildHarness(modelConfig: TenantModelConfig): Promise<Context> {
     })
     ctx.llm.registerAdapter(['deepseek-official'], new DeepSeekAdapter({
       options: () => options,
-      resolveApiKey: async () => {
+      resolveApiKey: () => {
         if (modelConfig.apiKey === null) {
           throw new LlmError('No DeepSeek API key is configured for this tenant', 'MISSING_CREDENTIAL')
         }
-        return modelConfig.apiKey
+        return Promise.resolve(modelConfig.apiKey)
       },
       resolveUserId: () => getOrCreateAnonymousUserId(),
     }))
@@ -206,8 +217,10 @@ async function releaseLease(redis: RedisClient, key: string, token: string): Pro
 async function loadCommand(tenantId: string, commandId: string): Promise<Command | undefined> {
   return one<Command>(`
     SELECT c.tenant_id, c.id, c.session_id, c.payload, c.status, c.cancel_requested,
-      s.provider, s.model, s.header
-    FROM agent_commands c JOIN sessions s ON s.tenant_id = c.tenant_id AND s.id = c.session_id
+      s.provider, s.model, s.header, s.workspace_id
+    FROM agent_commands c
+    JOIN sessions s ON s.tenant_id = c.tenant_id AND s.id = c.session_id
+    JOIN tenant_workspaces w ON w.tenant_id = s.tenant_id AND w.id = s.workspace_id
     WHERE c.tenant_id = $1 AND c.id = $2
   `, [tenantId, commandId])
 }
@@ -257,10 +270,14 @@ async function executeCommand(redis: RedisClient, command: Command): Promise<voi
 
   let ctx: Context | undefined
   try {
-    ctx = await buildHarness(await tenantModelConfig(command.tenant_id))
+    ctx = await buildHarness(await tenantModelConfig(command.tenant_id), command.tenant_id, command.workspace_id)
     const id = internalSessionId(command.tenant_id, command.session_id)
     const handle = command.header === null
-      ? await ctx.agents.create({ sessionId: id, agentOptions: { provider: command.provider, model: command.model } })
+      ? await ctx.agents.create({
+        sessionId: id,
+        meta: { cwd: workspaceRootPath(command.tenant_id, command.workspace_id) },
+        agentOptions: { provider: command.provider, model: command.model },
+      })
       : await ctx.agents.resume({ resumeSessionId: id, agentOptions: { provider: command.provider, model: command.model } })
     activeAgents.set(`${command.tenant_id}/${command.session_id}`, handle.agent)
     handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: command.payload.text }], source: { kind: 'user' } }))
