@@ -133,6 +133,85 @@ interface PendingInteractionRow {
   response: Record<string, unknown> | null
 }
 
+const DEFAULT_HISTORY_MAX_MESSAGES = 50
+
+interface HistoryWindow {
+  beforeSeq: number | undefined
+  maxMessages: number
+}
+
+interface HistoryPage {
+  events: Array<{ event: unknown }>
+  hasMore: boolean
+}
+
+/** Validate the distributed RPC payload against the upstream history schema. */
+function historyWindow(payload: Record<string, unknown>): HistoryWindow {
+  const beforeSeq = payload['beforeSeq']
+  if (beforeSeq !== undefined && (!Number.isSafeInteger(beforeSeq) || (beforeSeq as number) < 0)) {
+    throw new HttpError(400, 'beforeSeq must be a non-negative integer')
+  }
+  const maxMessages = payload['maxMessages'] ?? DEFAULT_HISTORY_MAX_MESSAGES
+  if (!Number.isSafeInteger(maxMessages) || (maxMessages as number) <= 0) {
+    throw new HttpError(400, 'maxMessages must be a positive integer')
+  }
+  return { beforeSeq: beforeSeq as number | undefined, maxMessages: maxMessages as number }
+}
+
+/**
+ * Read one message-aligned history page without truncating an assistant
+ * message's source chunks. The CTE keeps boundary selection and event reads in
+ * one PostgreSQL snapshot, matching the upstream ApiProxy pagination contract.
+ */
+async function readHistoryPage(
+  tenantId: string,
+  sessionId: string,
+  window: HistoryWindow,
+): Promise<HistoryPage> {
+  const result = await pool.query<{ event: unknown; cut: string }>(`
+    WITH message_events AS MATERIALIZED (
+      SELECT seq, event
+      FROM session_events
+      WHERE tenant_id = $1 AND session_id = $2
+        AND ($3::bigint IS NULL OR seq < $3)
+        AND event->>'type' IN ('user/message', 'assistant/message')
+        AND event->>'surfaceOp' = 'append'
+      ORDER BY seq DESC
+      LIMIT $4
+    ), boundary AS (
+      SELECT CASE
+        WHEN count(*) < $4::bigint THEN 0::bigint
+        ELSE (
+          SELECT LEAST(
+            message.seq,
+            COALESCE((
+              SELECT min(source.seq::bigint)
+              FROM jsonb_array_elements_text(
+                COALESCE(message.event->'sourceEventSeqs', '[]'::jsonb)
+              ) AS source(seq)
+            ), message.seq)
+          )
+          FROM message_events message
+          ORDER BY message.seq ASC
+          LIMIT 1
+        )
+      END AS cut
+      FROM message_events
+    )
+    SELECT stored.event, boundary.cut::text AS cut
+    FROM session_events stored
+    CROSS JOIN boundary
+    WHERE stored.tenant_id = $1 AND stored.session_id = $2
+      AND stored.seq >= boundary.cut
+      AND ($3::bigint IS NULL OR stored.seq < $3)
+    ORDER BY stored.seq ASC
+  `, [tenantId, sessionId, window.beforeSeq ?? null, window.maxMessages])
+  return {
+    events: result.rows.map(row => ({ event: row.event })),
+    hasMore: Number(result.rows[0]?.cut ?? 0) > 0,
+  }
+}
+
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Uint8Array[] = []
   let size = 0
@@ -772,17 +851,13 @@ async function handleRpc(
       case 'session.history': {
         if (sessionId === undefined) throw new HttpError(400, 'sessionId is required')
         await ownedSession(auth.tenantId, auth.userId, sessionId)
-        const beforeSeq = typeof payload['beforeSeq'] === 'number' ? payload['beforeSeq'] : undefined
-        const result = await pool.query<{ event: unknown }>(`
-          SELECT event FROM session_events
-          WHERE tenant_id = $1 AND session_id = $2 AND ($3::bigint IS NULL OR seq < $3)
-          ORDER BY seq ASC LIMIT 1000
-        `, [auth.tenantId, sessionId, beforeSeq ?? null])
+        const window = historyWindow(payload)
+        const page = await readHistoryPage(auth.tenantId, sessionId, window)
         const value: Record<string, unknown> = {
-          events: result.rows.map(row => ({ event: row.event })),
-          hasMore: false,
+          events: page.events,
+          hasMore: page.hasMore,
         }
-        if (beforeSeq === undefined) value['projections'] = await sessionProjections(auth.tenantId, sessionId)
+        if (window.beforeSeq === undefined) value['projections'] = await sessionProjections(auth.tenantId, sessionId)
         return rpcSuccess(request.rpcId, value)
       }
       case 'session.models': {
@@ -920,17 +995,13 @@ async function handleRpc(
         }
         if (mode !== 'one-shot' && mode !== 'continuable') throw new HttpError(400, 'subagent mode is invalid')
         await ownedSubagent(auth, parentSessionId, childSessionId, mode)
-        const beforeSeq = typeof payload['beforeSeq'] === 'number' ? payload['beforeSeq'] : undefined
-        const result = await pool.query<{ event: unknown }>(`
-          SELECT event FROM session_events
-          WHERE tenant_id = $1 AND session_id = $2 AND ($3::bigint IS NULL OR seq < $3)
-          ORDER BY seq ASC LIMIT 1000
-        `, [auth.tenantId, childSessionId, beforeSeq ?? null])
+        const window = historyWindow(payload)
+        const page = await readHistoryPage(auth.tenantId, childSessionId, window)
         const value: Record<string, unknown> = {
-          events: result.rows.map(row => ({ event: row.event })),
-          hasMore: false,
+          events: page.events,
+          hasMore: page.hasMore,
         }
-        if (beforeSeq === undefined) value['projections'] = await sessionProjections(auth.tenantId, childSessionId)
+        if (window.beforeSeq === undefined) value['projections'] = await sessionProjections(auth.tenantId, childSessionId)
         return rpcSuccess(request.rpcId, value)
       }
       case 'subagent.prompt': {

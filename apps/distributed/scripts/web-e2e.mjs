@@ -290,6 +290,18 @@ await waitFor(() => {
   return completedTurns > completedTurnsBeforeWorkspace ? completedTurns : undefined
 }, 'workspace turn/end WebSocket frame')
 
+const tailPage = await rpc('session.history', { sessionId, maxMessages: 2 })
+const tailMessages = tailPage.events.filter(entry =>
+  (entry.event.type === 'user/message' || entry.event.type === 'assistant/message')
+  && entry.event.surfaceOp === 'append')
+assert.equal(tailMessages.length, 2, 'history tail must honor the message count')
+assert.equal(tailPage.hasMore, true, 'history tail must advertise older events')
+const tailStartSeq = tailPage.events[0].event.seq
+const olderPage = await rpc('session.history', { sessionId, beforeSeq: tailStartSeq, maxMessages: 2 })
+assert.ok(olderPage.events.length > 0, 'history pagination must load an older page')
+assert.ok(olderPage.events.every(entry => entry.event.seq < tailStartSeq), 'history pages must not overlap')
+assert.equal(olderPage.projections, undefined, 'only the live tail carries projections')
+
 const compacted = await rpc('commands/execute', { args: { agentId: sessionId, line: '/compact' } })
 assert.equal(compacted.result.kind, 'success')
 
