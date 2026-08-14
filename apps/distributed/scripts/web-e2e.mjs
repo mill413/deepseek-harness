@@ -64,6 +64,13 @@ assert.equal(shellResponse.status, 200)
 const shell = await shellResponse.text()
 assert.doesNotMatch(shell, /data-model|model-config-dialog/u, 'model configuration must use the upstream Settings view')
 assert.match(shell, /1× API/u)
+const pluginEventsController = new AbortController()
+const pluginEvents = await fetch(`${baseUrl}/plugins/events`, { signal: pluginEventsController.signal })
+assert.equal(pluginEvents.status, 200)
+assert.match(pluginEvents.headers.get('content-type') ?? '', /^text\/event-stream/u)
+const firstPluginEventChunk = await pluginEvents.body?.getReader().read()
+assert.match(new TextDecoder().decode(firstPluginEventChunk?.value), /distributed static client graph/u)
+pluginEventsController.abort()
 
 const unauthenticated = await jsonRequest('/api/session.list', {
   method: 'POST',
@@ -84,6 +91,11 @@ assert.equal(registration.value.user.role, 'admin')
 const currentSession = await jsonRequest('/auth/session')
 assert.equal(currentSession.response.status, 200)
 assert.equal(currentSession.value.tenant.slug, `web-${suffix}`)
+
+const inspectManifest = await rpc('dynamicCordisRunner/syncInspectManifest', {})
+assert.equal(inspectManifest, null)
+const dynamicCordisInventory = await rpc('dynamicCordisRunner/inventory', {})
+assert.deepEqual(dynamicCordisInventory, [])
 
 const initialModel = await jsonRequest('/admin/model-config')
 assert.equal(initialModel.response.status, 200)

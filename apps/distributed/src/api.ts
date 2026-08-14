@@ -1391,6 +1391,17 @@ async function handleRpc(
             ['tools', '@deepseek-ai/dsh-tools'],
           ].map(([entryId, moduleName]) => ({ entryId, moduleName, enabled: true, fiberPhase: 'active' })),
         })
+      case 'dynamicCordisRunner/syncInspectManifest':
+        // The distributed runtime does not execute dynamic Cordis packages yet,
+        // but the complete upstream client still publishes its read-only inspect
+        // provider directory during boot. Accepting the snapshot keeps that
+        // compatibility handshake quiet without claiming execution support.
+        return rpcSuccess(request.rpcId, null)
+      case 'dynamicCordisRunner/inventory':
+        // No distributed owner exists for dynamic package definitions. An empty
+        // successful inventory lets the upstream panel render its honest empty
+        // state; mutating runner methods continue to fail explicitly below.
+        return rpcSuccess(request.rpcId, [])
       case 'messageFeedback/list':
       case 'messageFeedback/put':
       case 'messageFeedback/delete': {
@@ -1549,6 +1560,22 @@ async function route(request: IncomingMessage, response: ServerResponse, redis: 
     await pool.query('SELECT 1')
     const pong = await redis.ping()
     send(response, 200, { ok: true, role: 'api', instanceId: config.apiInstanceId, postgres: 'ok', redis: pong })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/plugins/events') {
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    })
+    response.write(': distributed static client graph\n\n')
+    const heartbeat = setInterval(() => {
+      if (!response.destroyed) response.write(': keepalive\n\n')
+    }, 15_000)
+    const cleanup = (): void => { clearInterval(heartbeat) }
+    request.once('close', cleanup)
+    response.once('close', cleanup)
     return
   }
 

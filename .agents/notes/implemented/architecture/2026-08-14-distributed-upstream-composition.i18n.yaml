@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-14-distributed-upstream-composition.md
-2026-08-14-distributed-upstream-composition.md: af32b73edf6646108e8df70f6a80f531c424d564
-2026-08-14-distributed-upstream-composition.zh.md: 1c3b920fbaf6cd167e3da4112c7064fc90b4dc96
+2026-08-14-distributed-upstream-composition.md: 2178d569150650e87aab6943345bec44e63e97f0
+2026-08-14-distributed-upstream-composition.zh.md: 264f3278769a9ba256e7db40ccf4d9d52a2612ab

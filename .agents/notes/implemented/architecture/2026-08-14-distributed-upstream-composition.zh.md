@@ -18,11 +18,11 @@ Status: implemented
 
 一个内部 Workspace 容器拥有持久卷，并运行上游文件系统、搜索、编辑器、Bash、子进程和后台任务提供方。Worker 通过普通 Harness 工具注册公开这些 schema，并携带租户、工作区和权限身份转发执行。工作区内的 `.dsh/skills` 与 `.agents/skills` 目录提供 skill（技能）目录和指令正文。这是一层部署所有权适配器，不会 fork 面向模型的工具 schema 或展示转换器。
 
-客户端组合一致不代表需要分布式所有权的能力已具备运行时一致性。交互式审批与用户提问、subagent 与工作流执行、MCP 服务生命周期、实时 Cordis 插件重配置、Web 搜索、LSP 以及硬沙箱隔离仍不可用，直至每项能力都有租户级控制面和持久跨进程协议。其上游客户端插件可以渲染由其他位置产生的持久事件或空状态，但 API 会对不支持的 RPC 返回明确失败，不会伪装操作成功。
+客户端组合一致不代表需要分布式所有权的能力已具备运行时一致性。交互式审批与用户提问、subagent 与工作流执行、MCP 服务生命周期、实时 Cordis 插件重配置、Web 搜索、LSP 以及硬沙箱隔离仍不可用，直至每项能力都有租户级控制面和持久跨进程协议。其上游客户端插件可以渲染由其他位置产生的持久事件或空状态，但 API 会对不支持的修改返回明确失败，不会伪装操作成功。只读启动握手是一个严格限定的例外：静态部署让上游 HMR EventSource 连接到空闲 SSE 通道，接受客户端检查器提供方目录，并返回空的动态 Cordis 清单。这些兼容性读取不会宣称已有动态执行所有者，只是避免把受支持的空状态表现成传输错误。
 
 ## Verification
 
-`apps/distributed/scripts/web-e2e.mjs` 通过 20810 端口验证认证、工作区选择、上游设置与模型页面、旧模型快捷入口的移除、设置修改、只写凭据、agent 预设、模式、权限、目标、消息反馈、共享工作区工具、上下文压缩、WebSocket 投递和租户隔离。`e2e.mjs`、`workspace-e2e.mjs` 与 `openai-e2e.mjs` 分别覆盖单 API/双 Worker 调度与恢复、原始工作区提供方和 OpenAI-compatible 适配器。TypeScript 构建和 Web 组装器的依赖校验会拒绝适配器或客户端图漂移。
+`apps/distributed/scripts/web-e2e.mjs` 通过 20810 端口验证认证、静态 HMR SSE 通道、动态 Cordis 启动握手、工作区选择、上游设置与模型页面、旧模型快捷入口的移除、设置修改、只写凭据、agent 预设、模式、权限、目标、消息反馈、共享工作区工具、上下文压缩、WebSocket 投递和租户隔离。`e2e.mjs`、`workspace-e2e.mjs` 与 `openai-e2e.mjs` 分别覆盖单 API/双 Worker 调度与恢复、原始工作区提供方和 OpenAI-compatible 适配器。TypeScript 构建和 Web 组装器的依赖校验会拒绝适配器或客户端图漂移。
 
 ## Alternatives considered
 
