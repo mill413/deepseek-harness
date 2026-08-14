@@ -15,6 +15,7 @@
     { "path": "../../packages/jobs/jobs-local" },
     { "path": "../../packages/llm/llm" },
     { "path": "../../packages/llm/llm-deepseek" },
+    { "path": "../../packages/guard/repeat-tool-reminder" },
     { "path": "../../packages/core/session" },
     { "path": "../../packages/session/session-checkpoint-policy" },
     { "path": "../../packages/session/session-persistence" },
@@ -27,6 +28,7 @@
     { "path": "../../packages/jobs/tool-jobs" },
     { "path": "../../packages/guard/timeout-policy" },
     { "path": "../../packages/fs/tool-str-replace-editor" },
+    { "path": "../../packages/todo/tool-todo" },
     { "path": "../../packages/core/tools" }
   ]
 }

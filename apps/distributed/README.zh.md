@@ -41,6 +41,8 @@ docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=htt
 
 一个内部 Workspace 服务独占 `workspace-data` 卷。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。Worker 会为上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` 定义注册 RPC 代理，而原始上游实现在 Workspace 容器内执行。因此前台与后台 shell 进程、ripgrep 搜索和文件修改可在两个 Worker 之间共享同一个持久目录，并能跨 Workspace 服务重启保留。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
 
+分布式适配器是 Cordis 插件，而不是上游工具的 fork。Workspace 运行时插件在一个工作区作用域生命周期内组合原始文件系统、搜索、编辑器、Bash 和 Jobs provider；Worker 适配器拥有远程目录监听器和代理注册。每个命令运行时还会在持有 Agent 的 Worker 中挂载上游 `todo_write` 工具和重复调用提醒，因此 todo 快照会进入 PostgreSQL 会话日志，连续重复的相同调用也会收到标准的模型可见指引。MCP、Skill、Web、LSP 和 subagent 等依赖 provider 的功能需要租户配置或额外的分布式所有权，因此未由此组合挂载。
+
 租户管理员通常在右上角“模型配置”中完成设置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API，并填写默认模型、Base URL 和 API Key。API Key 使用 AES-256-GCM 加密后存入 PostgreSQL，接口永不回显。每个 Worker 会在命令开始前解析对应租户的配置快照，因此不会通过进程全局环境变量串用密钥。
 
 以下部署变量提供初始值或回退默认值：

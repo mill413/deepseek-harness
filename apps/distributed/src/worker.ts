@@ -23,7 +23,7 @@ import { internalSessionId } from './identity.ts'
 import { tenantModelConfig, type TenantModelConfig } from './model-config.ts'
 import PostgresSessionPersistence from './postgres-persistence.ts'
 import { connectRedis, ensureGroup, type RedisClient } from './redis.ts'
-import { registerWorkspaceTools } from './workspace-client.ts'
+import * as WorkerExtensions from './worker-extensions.ts'
 import { workspaceRootPath } from './workspace-path.ts'
 
 interface Command {
@@ -106,6 +106,14 @@ function toolChunks(callId: string, name = 'worker_probe', input: unknown = { in
   ]
 }
 
+function todoChunks(callId: string): StreamChunk[] {
+  return toolChunks(callId, 'todo_write', {
+    todos: [
+      { content: 'Verify upstream plugin adaptation', status: 'completed' },
+    ],
+  })
+}
+
 class DistributedMockAdapter extends LlmAdapter {
   private calls = 0
 
@@ -119,6 +127,8 @@ class DistributedMockAdapter extends LlmAdapter {
     const hasToolResult = last?.content.some(block => block.type === 'tool-result') === true
     const requestsWorkspaceProbe = last?.content.some(block =>
       block.type === 'text' && block.text.includes('[workspace-e2e]')) === true
+    const requestsTodoProbe = last?.content.some(block =>
+      block.type === 'text' && block.text.includes('[todo-e2e]')) === true
     const chunks = hasToolResult
       ? textChunks(`completed by ${config.workerId}`)
       : requestsWorkspaceProbe
@@ -126,7 +136,9 @@ class DistributedMockAdapter extends LlmAdapter {
           command: 'printf workspace-proxy-ok > worker-proxy.txt && pwd && printf workspace-proxy-ok',
           description: 'Verify shared workspace proxy execution',
         })
-        : toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
+        : requestsTodoProbe
+          ? todoChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
+          : toolChunks(`${config.workerId}-${++this.calls}-${randomUUID()}`)
     for (const chunk of chunks) {
       options.signal?.throwIfAborted()
       yield chunk
@@ -153,7 +165,7 @@ async function buildHarness(modelConfig: TenantModelConfig, tenantId: string, wo
   await ctx.plugin(AgentLoop, { agents: [] })
   await ctx.plugin(PostgresSessionPersistence)
   await ctx.plugin({ name: 'session-checkpoint-policy', inject: [...checkpointInject], apply: checkpointPolicy })
-  await registerWorkspaceTools(ctx, tenantId, workspaceId)
+  await ctx.plugin(WorkerExtensions, { tenantId, workspaceId })
   ctx.llm.registerAdapter(['distributed-mock'], new DistributedMockAdapter())
   if (modelConfig.mode === 'deepseek') {
     const options = resolveAdapterOptions({

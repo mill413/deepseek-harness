@@ -3,6 +3,20 @@ import type { ContentBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { config } from './config.ts'
 
+/** Stable Cordis plugin name used by diagnostics. */
+export const name = 'distributed-workspace-tools'
+
+/** Services consumed by the remote tool adapter. */
+export const inject = ['systemPrompt', 'tools']
+
+/** Tenant and workspace selected for one command runtime. */
+export interface Config {
+  /** Tenant that owns the workspace. */
+  tenantId: string
+  /** Workspace whose catalog and executions are exposed. */
+  workspaceId: string
+}
+
 interface WorkspaceCatalog {
   root: string
   tools: ToolSchema[]
@@ -59,12 +73,16 @@ function parseExecutionResult(value: unknown): ToolExecutionResult {
   return body as unknown as ToolExecutionResult
 }
 
-/** Load one workspace's upstream tool catalog and register RPC-backed definitions in a worker context. */
-export async function registerWorkspaceTools(
-  ctx: Context,
-  tenantId: string,
-  workspaceId: string,
-): Promise<string> {
+/**
+ * Register one workspace's upstream catalog as RPC-backed definitions.
+ * Cordis owns the listener and tool registrations, so disposing this plugin
+ * removes the complete remote generation from the command runtime.
+ *
+ * @param ctx - Worker command context carrying prompt and tool services.
+ * @param pluginConfig - selected tenant and workspace identity.
+ */
+export async function apply(ctx: Context, pluginConfig: Config): Promise<void> {
+  const { tenantId, workspaceId } = pluginConfig
   const catalog = parseCatalog(await post('/internal/v1/catalog', { tenantId, workspaceId }))
   const remoteNames = new Set(catalog.tools.map(tool => tool.name))
   for (const section of catalog.guidance) {
@@ -106,5 +124,4 @@ export async function registerWorkspaceTools(
     }
     ctx.tools.register(definition)
   }
-  return catalog.root
 }

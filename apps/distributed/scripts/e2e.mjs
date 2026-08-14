@@ -68,13 +68,14 @@ for (let index = 0; index < sessions.length; index += 1) {
 const firstEvents = await request(apis[0], `/v1/sessions/${sessions[0].id}/events?afterSeq=-1`)
 const followup = await request(apis[1], `/v1/sessions/${sessions[0].id}/messages`, {
   method: 'POST',
-  body: JSON.stringify({ text: 'resume this session through the other API' }),
+  body: JSON.stringify({ text: '[todo-e2e] resume this session through the other API' }),
 }, 202)
 const followupDone = await waitForCommand(apis[0], followup.id)
 assert.equal(followupDone.status, 'completed')
 const resumed = await request(apis[1], `/v1/sessions/${sessions[0].id}/events?afterSeq=-1`)
 assert.ok(resumed.events.length > firstEvents.events.length)
 assert.equal(resumed.events.filter(event => event.type === 'user/message').length, 2)
+assert.ok(resumed.events.some(event => event.type === 'todo/write'))
 assert.deepEqual(resumed.events.map(event => event.seq), Array.from({ length: resumed.events.length }, (_, seq) => seq))
 
 console.log(JSON.stringify({

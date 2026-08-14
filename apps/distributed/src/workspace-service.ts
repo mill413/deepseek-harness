@@ -3,22 +3,11 @@ import { mkdir, realpath } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import LocalBashExecutor from '@deepseek-ai/dsh-bash-local'
-import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
-import LocalJobRegistry from '@deepseek-ai/dsh-jobs-local'
-import { ShellEnvRegistry } from '@deepseek-ai/dsh-shell-env'
-import LocalSubprocessRuntime from '@deepseek-ai/dsh-subprocess-local'
-import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import * as ToolBash from '@deepseek-ai/dsh-tool-bash'
-import * as ToolFs from '@deepseek-ai/dsh-tool-fs'
-import * as ToolFsSearch from '@deepseek-ai/dsh-tool-fs-search'
-import * as ToolJobs from '@deepseek-ai/dsh-tool-jobs'
-import * as ToolCallTimeoutPolicy from '@deepseek-ai/dsh-tool-call-timeout-policy'
-import * as ToolStrReplaceEditor from '@deepseek-ai/dsh-tool-str-replace-editor'
-import ToolRuntime, { type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { config } from './config.ts'
 import { HttpError, assertUuid } from './identity.ts'
 import { workspaceRootPath } from './workspace-path.ts'
+import * as WorkspaceRuntime from './workspace-runtime.ts'
 
 const BODY_LIMIT = 2 * 1024 * 1024
 const PATH_TOOLS = new Map<string, string>([
@@ -163,19 +152,7 @@ async function createWorkspaceContext(tenantId: string, workspaceId: string): Pr
   const root = await realpath(requestedRoot)
   const ctx = new Context()
   try {
-    await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false })
-    await ctx.plugin(ToolRuntime, { mode: 'native' })
-    await ctx.plugin(ToolCallTimeoutPolicy)
-    await ctx.plugin(LocalSubprocessRuntime)
-    await ctx.plugin(LocalFileSystem, { cwd: root })
-    await ctx.plugin(LocalBashExecutor, { cwd: root })
-    await ctx.plugin(ShellEnvRegistry, {})
-    await ctx.plugin(LocalJobRegistry, {})
-    await ctx.plugin(ToolFs, {})
-    await ctx.plugin(ToolFsSearch, { sampleOverCapGlobResults: false })
-    await ctx.plugin(ToolStrReplaceEditor, {})
-    await ctx.plugin(ToolJobs, { completionDelivery: 'quiet' })
-    await ctx.plugin(ToolBash, { enableRunInBackground: true })
+    await ctx.plugin(WorkspaceRuntime, { root })
     return { ctx, root }
   } catch (error) {
     await ctx.fiber.dispose().catch((disposeError: unknown) => {

@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/architecture/2026-08-14-distributed-api-redis-worker.md
-2026-08-14-distributed-api-redis-worker.md: 44308a390769f218fe36296462d940c17decafcd
-2026-08-14-distributed-api-redis-worker.zh.md: 48cbebab3ecbb1ff93ed0f632faac31ce6da677d
+2026-08-14-distributed-api-redis-worker.md: 462316d56d6c3a25b01ffca4627dd50889f0e906
+2026-08-14-distributed-api-redis-worker.zh.md: ccc91cbffa72fe6ce53be4776d903cc09319a084

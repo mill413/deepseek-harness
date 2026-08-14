@@ -24,6 +24,8 @@ Redis 只保存加速状态。Streams 调度准入，带过期时间的键承载
 
 原生输入框和工具运行时共同使用 PostgreSQL 管理的租户 Workspace 记录，以及会话归属与顺序。注册会创建默认 `/workspace` 记录，迁移则把全部已有会话挂到各租户默认工作区。Workspace RPC 与 host-stream 增量实现跨副本原生客户端契约。一个内部 Workspace 服务独占持久卷，并把所选数据库身份映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 副本都不挂载该卷。Worker 在构建命令运行时时获取上游工具目录和指引，注册模型可见代理定义，并通过带认证的内部 HTTP 边界转发调用。Workspace 服务为每个工作区维护长生命周期 Cordis 上下文，并在其中运行原始文件系统、ripgrep 搜索、字符串编辑器、Bash 和后台任务插件，因此后续轮次即使落到另一个 Worker，命令执行和文件仍然共享。
 
+分布式集成会保留上游插件的所有权。Workspace 运行时组合插件把原始本地 provider 和工具 consumer 挂载为子 Fiber，Worker 侧 Cordis 适配器则拥有远程工具目录监听器和代理注册。递归 dispose 会移除完整工具世代，无需自定义清理。依赖 Agent 作用域的上游插件仍然位于 Worker：`todo_write` 把快照记录到 PostgreSQL 支持的会话日志，重复调用提醒则会在连续相同调用后贡献其标准日志上下文。需要凭据、外部选择 provider 或子 Agent 所有权的插件，要等租户作用域配置和相应分布式生命周期存在后再挂载。
+
 内部服务会校验租户与工作区 UUID，通过数据库身份派生存储路径而不信任逻辑展示路径，拒绝已有规范祖先逃逸所选根目录的文件/搜索/编辑器路径，转发取消信号，并用共享服务令牌保护不对外开放的 3200 端口。这是刻意的逻辑路由，而不是对恶意代码租户隔离的承诺：单容器内的任意 Bash 工具仍构成共享信任边界。强隔离需要把 Workspace provider 放置方式改成按信任域分配容器或微虚拟机，同时保留 Worker 代理契约。
 
 ## Alternatives considered
@@ -45,6 +47,7 @@ Redis 只保存加速状态。Streams 调度准入，带过期时间的键承载
 - 浏览器用户可以创建相互隔离的租户并使用数据库会话认证；租户管理员无需重建容器即可修改模型配置。
 - 每个租户都有可选择的默认 Workspace，因此官方输入框可以创建绑定工作区的会话并直接开始对话，无需绕过 Web 协议。
 - Agent 会接收上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` schema 与指引，而对应文件和进程工作全部在持有卷的 Workspace 容器中执行。
+- Agent 还会在 Worker 进程中获得上游 `todo_write` 工具和重复调用提醒；它们的会话事件使用与其余对话相同的 PostgreSQL 持久化和跨 API 回放路径。
 - Workspace 文件可跨 Workspace 服务和 Worker 重启保留，两个 Worker 也能看到同一个所选目录；后台任务注册表状态仍局限于 Workspace 服务进程，不能跨该服务重启。
 - 面向文件的 RPC 调用具备规范根目录检查，但任意 Bash 执行使单容器拓扑成为一个信任域，而不是硬多租户沙箱。
 - PostgreSQL 负载与按命令构建运行时的成本高于粘性 actor 设计，但恢复行为明确且可测试。

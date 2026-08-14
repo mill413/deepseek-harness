@@ -458,7 +458,8 @@ async function handleRpc(
         const beforeWorkspaceId = typeof payload['beforeWorkspaceId'] === 'string' ? assertUuid(payload['beforeWorkspaceId'], 'beforeWorkspaceId') : undefined
         if (workspaceId === undefined) throw new HttpError(400, 'workspaceId is required')
         const rows = await workspaceRows(auth)
-        if (!rows.some(row => row.id === workspaceId) || (beforeWorkspaceId !== undefined && !rows.some(row => row.id === beforeWorkspaceId))) {
+        const beforeExists = beforeWorkspaceId === undefined || rows.some(row => row.id === beforeWorkspaceId)
+        if (!rows.some(row => row.id === workspaceId) || !beforeExists) {
           throw new HttpError(404, 'workspace not found')
         }
         const ids = rows.map(row => row.id).filter(id => id !== workspaceId)
@@ -773,118 +774,118 @@ function attachWebSockets(server: Server): WebSocketServerInstance {
     }
     void authenticate(request).then((auth) => {
       sockets.handleUpgrade(request, socket, head, (websocket) => {
-      sockets.emit('connection', websocket, request)
-      if (url.pathname === '/api/events.mux') {
-        const cursors = new Map<string, number>()
-        let polling = false
-        const poll = async (): Promise<void> => {
-          if (polling || websocket.readyState !== WebSocketRuntime.OPEN) return
-          polling = true
-          try {
-            const sessions = await rpcSessions(auth)
-            for (const session of sessions) {
-              if (!cursors.has(session.id)) {
-                const lastSeq = session.last_seq === null ? -1 : Number(session.last_seq)
-                cursors.set(session.id, lastSeq)
-                websocketFrame(websocket, {
-                  type: 'session/subscribed',
-                  sessionId: session.id,
-                  lastSeq,
-                })
-                continue
-              }
-              const afterSeq = cursors.get(session.id) as number
-              const batch = await events(auth.tenantId, session.id, afterSeq) as Array<Record<string, unknown>>
-              for (const event of batch) {
-                if (typeof event['seq'] === 'number') cursors.set(session.id, event['seq'])
-                websocketFrame(websocket, { type: 'session/event', sessionId: session.id, event })
-              }
-            }
-          } catch (error) {
-            console.error('mux WebSocket poll failed', error)
-            websocket.close()
-          } finally {
-            polling = false
-          }
-        }
-        void poll()
-        const timer = setInterval(() => void poll(), 250)
-        websocket.once('close', () => { clearInterval(timer) })
-      } else {
-        const known = new Map<string, string>()
-        const knownWorkspaces = new Map<string, string>()
-        let knownArchived = ''
-        let polling = false
-        const poll = async (): Promise<void> => {
-          if (polling || websocket.readyState !== WebSocketRuntime.OPEN) return
-          polling = true
-          try {
-            const sessions = await rpcSessions(auth)
-            const current = new Set(sessions.map(session => session.id))
-            for (const session of sessions) {
-              const status = session.status
-              const previous = known.get(session.id)
-              if (previous === undefined) {
-                known.set(session.id, status)
-                websocketFrame(websocket, {
-                  type: 'host/session-added',
-                  sessionId: session.id,
-                  blank: Number(session.event_count) === 0,
-                  ...(session.cwd === null ? {} : { cwd: session.cwd }),
-                })
-              } else if (previous !== status) {
-                known.set(session.id, status)
-                websocketFrame(websocket, {
-                  type: 'host/session-status',
-                  sessionId: session.id,
-                  running: status === 'running',
-                })
-                if (status === 'failed') {
+        sockets.emit('connection', websocket, request)
+        if (url.pathname === '/api/events.mux') {
+          const cursors = new Map<string, number>()
+          let polling = false
+          const poll = async (): Promise<void> => {
+            if (polling || websocket.readyState !== WebSocketRuntime.OPEN) return
+            polling = true
+            try {
+              const sessions = await rpcSessions(auth)
+              for (const session of sessions) {
+                if (!cursors.has(session.id)) {
+                  const lastSeq = session.last_seq === null ? -1 : Number(session.last_seq)
+                  cursors.set(session.id, lastSeq)
                   websocketFrame(websocket, {
-                    type: 'host/agent-error',
+                    type: 'session/subscribed',
                     sessionId: session.id,
-                    message: 'The distributed worker failed this turn.',
+                    lastSeq,
                   })
+                  continue
+                }
+                const afterSeq = cursors.get(session.id) as number
+                const batch = await events(auth.tenantId, session.id, afterSeq) as Array<Record<string, unknown>>
+                for (const event of batch) {
+                  if (typeof event['seq'] === 'number') cursors.set(session.id, event['seq'])
+                  websocketFrame(websocket, { type: 'session/event', sessionId: session.id, event })
                 }
               }
+            } catch (error) {
+              console.error('mux WebSocket poll failed', error)
+              websocket.close()
+            } finally {
+              polling = false
             }
-            for (const sessionId of known.keys()) {
-              if (current.has(sessionId)) continue
-              known.delete(sessionId)
-              websocketFrame(websocket, { type: 'host/session-removed', sessionId })
-            }
-            const workspaces = await workspaceRows(auth)
-            const currentWorkspaces = new Set(workspaces.map(workspace => workspace.id))
-            for (const workspace of workspaces) {
-              const view = workspaceView(workspace)
-              const signature = JSON.stringify(view)
-              if (knownWorkspaces.get(workspace.id) !== signature) {
-                knownWorkspaces.set(workspace.id, signature)
-                websocketFrame(websocket, { type: 'host/workspace-changed', workspace: view })
-              }
-            }
-            for (const workspaceId of knownWorkspaces.keys()) {
-              if (currentWorkspaces.has(workspaceId)) continue
-              knownWorkspaces.delete(workspaceId)
-              websocketFrame(websocket, { type: 'host/workspace-removed', workspaceId })
-            }
-            const archived = sessions.filter(session => session.archived).map(session => session.id)
-            const archivedSignature = JSON.stringify(archived)
-            if (knownArchived !== archivedSignature) {
-              knownArchived = archivedSignature
-              websocketFrame(websocket, { type: 'host/archived-sessions-changed', archivedSessionIds: archived })
-            }
-          } catch (error) {
-            console.error('host WebSocket poll failed', error)
-            websocket.close()
-          } finally {
-            polling = false
           }
+          void poll()
+          const timer = setInterval(() => void poll(), 250)
+          websocket.once('close', () => { clearInterval(timer) })
+        } else {
+          const known = new Map<string, string>()
+          const knownWorkspaces = new Map<string, string>()
+          let knownArchived = ''
+          let polling = false
+          const poll = async (): Promise<void> => {
+            if (polling || websocket.readyState !== WebSocketRuntime.OPEN) return
+            polling = true
+            try {
+              const sessions = await rpcSessions(auth)
+              const current = new Set(sessions.map(session => session.id))
+              for (const session of sessions) {
+                const status = session.status
+                const previous = known.get(session.id)
+                if (previous === undefined) {
+                  known.set(session.id, status)
+                  websocketFrame(websocket, {
+                    type: 'host/session-added',
+                    sessionId: session.id,
+                    blank: Number(session.event_count) === 0,
+                    ...(session.cwd === null ? {} : { cwd: session.cwd }),
+                  })
+                } else if (previous !== status) {
+                  known.set(session.id, status)
+                  websocketFrame(websocket, {
+                    type: 'host/session-status',
+                    sessionId: session.id,
+                    running: status === 'running',
+                  })
+                  if (status === 'failed') {
+                    websocketFrame(websocket, {
+                      type: 'host/agent-error',
+                      sessionId: session.id,
+                      message: 'The distributed worker failed this turn.',
+                    })
+                  }
+                }
+              }
+              for (const sessionId of known.keys()) {
+                if (current.has(sessionId)) continue
+                known.delete(sessionId)
+                websocketFrame(websocket, { type: 'host/session-removed', sessionId })
+              }
+              const workspaces = await workspaceRows(auth)
+              const currentWorkspaces = new Set(workspaces.map(workspace => workspace.id))
+              for (const workspace of workspaces) {
+                const view = workspaceView(workspace)
+                const signature = JSON.stringify(view)
+                if (knownWorkspaces.get(workspace.id) !== signature) {
+                  knownWorkspaces.set(workspace.id, signature)
+                  websocketFrame(websocket, { type: 'host/workspace-changed', workspace: view })
+                }
+              }
+              for (const workspaceId of knownWorkspaces.keys()) {
+                if (currentWorkspaces.has(workspaceId)) continue
+                knownWorkspaces.delete(workspaceId)
+                websocketFrame(websocket, { type: 'host/workspace-removed', workspaceId })
+              }
+              const archived = sessions.filter(session => session.archived).map(session => session.id)
+              const archivedSignature = JSON.stringify(archived)
+              if (knownArchived !== archivedSignature) {
+                knownArchived = archivedSignature
+                websocketFrame(websocket, { type: 'host/archived-sessions-changed', archivedSessionIds: archived })
+              }
+            } catch (error) {
+              console.error('host WebSocket poll failed', error)
+              websocket.close()
+            } finally {
+              polling = false
+            }
+          }
+          void poll()
+          const timer = setInterval(() => void poll(), 500)
+          websocket.once('close', () => { clearInterval(timer) })
         }
-        void poll()
-        const timer = setInterval(() => void poll(), 500)
-        websocket.once('close', () => { clearInterval(timer) })
-      }
       })
     }).catch(() => {
       socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n')
