@@ -1,0 +1,8 @@
+.git
+.pnpm-store
+node_modules
+**/lib
+**/.tsbuildinfo
+coverage
+website/.vitepress/cache
+website/.vitepress/dist

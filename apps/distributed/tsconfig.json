@@ -1,0 +1,21 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib"
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../vendor/cordis" },
+    { "path": "../../packages/identity/anonymous-user-id" },
+    { "path": "../../packages/core/agent" },
+    { "path": "../../packages/core/agent-loop" },
+    { "path": "../../packages/llm/llm" },
+    { "path": "../../packages/llm/llm-deepseek" },
+    { "path": "../../packages/core/session" },
+    { "path": "../../packages/session/session-checkpoint-policy" },
+    { "path": "../../packages/session/session-persistence" },
+    { "path": "../../packages/core/system-prompt" },
+    { "path": "../../packages/core/tools" }
+  ]
+}

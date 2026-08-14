@@ -1,0 +1,45 @@
+# Agent Note: Distributed admission keeps PostgreSQL authoritative
+
+Status: implemented
+
+English | [中文](2026-08-14-distributed-api-redis-worker.zh.md)
+
+## Problem
+
+The Harness Agent Loop, session store, and existing persistence implementations assume one process owns a live agent. Exposing that composition directly as a horizontally scaled API creates three coupled failures: an API process becomes both connection owner and executor, requests for one session can run concurrently on different replicas, and process loss can strand history or work without a durable command identity. Multi-tenancy adds a separate boundary: session ids alone cannot authorize reads or execution, and queue metadata cannot become the authority for tenant state.
+
+## Decision
+
+The distributed app separates stateless API admission from Worker execution. PostgreSQL owns tenants, owner-scoped sessions, command state, Harness session headers, and the append-only event log. Each command row is also the transactional outbox record. API replicas select undispatched rows with `FOR UPDATE SKIP LOCKED`, append them to one Redis consumer-group Stream, and then mark them dispatched; this deliberately permits duplicate delivery across a crash boundary.
+
+Workers first acquire a renewable Redis lease keyed by tenant and session, then atomically transition one queued PostgreSQL command to running. The command status is the idempotency gate, while the lease makes a session a single-writer actor across processes. A Worker creates or resumes the ordinary Harness Agent under an internal `tenant/session` identity, runs the native loop and tools, uses the session-checkpoint policy before model requests and tool side effects, flushes the event log, and only then completes the command. The runtime is recreated for each command in this MVP, so PostgreSQL recovery rather than sticky routing owns continuity.
+
+Redis is acceleration state only. Streams schedule admission, expiring keys carry leases and Worker heartbeats, and Pub/Sub wakes cancellation. PostgreSQL retains cancellation intent and serves event reads and SSE catch-up by monotonically contiguous sequence. Active-command heartbeats let an API pump return stale running commands to the outbox after two lease windows. An advisory lock serializes the idempotent schema migration when all four application replicas start together.
+
+Tenant identity is carried into the internal Harness session id and every PostgreSQL primary or foreign key. API reads and writes include both tenant and owner where the surface is user-owned. Browser authentication uses scrypt password hashes, random opaque session tokens whose hashes are stored in PostgreSQL, and HttpOnly SameSite cookies shared by HTTP and WebSocket requests. Nginx clears caller-provided identity headers before proxying browser traffic. Direct API ports retain header identity only as a test/service seam and must stay on a trusted network.
+
+The browser tier is a separate Nginx container that serves a statically assembled `apps/web` shell and a dependency-closed client-plugin graph. A small authentication shell gates native Web startup, provides tenant registration/login/logout and an administrator model dialog, then loads the official conversation UI. Nginx load-balances ordinary RPCs and the two authenticated WebSocket downlinks across both API replicas and owns port 20810. API replicas implement the native browser contract over the same PostgreSQL commands and events used by `/v1`; the Web process therefore owns no session or Agent state.
+
+Model configuration is tenant state in PostgreSQL. A tenant administrator selects Mock or DeepSeek, a default model, an endpoint, and optionally a tenant key. API keys are sealed with AES-256-GCM under a deployment key and are never returned by the API. A Worker reads and decrypts the tenant snapshot for each command, constructs an operation-local DeepSeek adapter, and never mutates a process-global API-key environment variable. This prevents concurrent tenant work from crossing credential boundaries.
+
+The native composer requires Workspace membership even when the distributed runtime has no shared filesystem. PostgreSQL therefore owns tenant-scoped logical Workspace records and session membership/order. Registration creates a default `/workspace` record, and the migration attaches every existing session to its tenant's default. Workspace RPCs and host-stream deltas implement the native client contract across replicas. The path is currently a logical label only; filesystem materialization is deliberately deferred until the deployment chooses a shared-volume, repository-checkout, or object-backed workspace strategy.
+
+## Alternatives considered
+
+- **Keep agents inside API replicas and use sticky sessions**: rejected because API lifecycle and executor lifecycle stay coupled, failover depends on load-balancer affinity, and a lost replica still needs a durable recovery protocol.
+- **Make Redis the command and transcript authority**: rejected because Stream retention, Pub/Sub loss, and Redis failover semantics are a poor ownership boundary for tenant records and append-only Harness history.
+- **Add tenant and queue concepts inside Agent Loop**: rejected because they are deployment concerns; the native loop remains reusable and its model/tool/checkpoint behavior stays testable independently.
+- **Hold a long-lived Session Actor on one Worker**: deferred because it reduces latency but requires actor placement, handoff, mailbox draining, and shutdown fencing. Per-command reconstruction proves the persistence and lease boundaries first.
+- **Promise exactly-once queue delivery**: rejected because the outbox-to-Redis boundary cannot be atomic. At-least-once scheduling plus an atomic PostgreSQL command claim gives the required execution behavior without a distributed transaction.
+- **Embed the Web UI in API replica one**: rejected because it makes one API a special ingress replica, bypasses API load balancing, and couples frontend rollout and health to admission capacity.
+
+## Consequences
+
+- Two APIs and two Workers can process independent sessions concurrently, while one session remains serial and can resume through another API and another Worker.
+- Native Harness context management, tool calls, checkpoint ordering, and event replay remain intact; Redis and tenancy do not enter model-visible context.
+- The repository's native Web shell can create sessions, select the configured model route, submit and cancel prompts, recover history, and render live model and tool events through either API replica.
+- Browser users can create isolated tenants and authenticate through a database-backed session; tenant administrators can change model configuration without rebuilding the containers.
+- Every tenant has a selectable default Workspace, so the official composer can create a Workspace-bound session and start a conversation without bypassing the Web protocol.
+- PostgreSQL load and per-command runtime construction are higher than a sticky actor design, but recovery behavior is explicit and testable.
+- A process crash can leave an old Redis pending entry; SQL recovery emits a fresh entry and the command gate prevents duplicate execution, but production operation still needs pending-entry reclamation, Stream trimming, dead-letter policy, metrics, and alerts.
+- Password recovery, invitations and user lifecycle management, MFA/SSO, quota enforcement, audit logging, coarse stale timeouts, approval flows, distributed subagents, key rotation workflow, TLS ingress hardening, and PostgreSQL row-level security are not production-complete in this MVP.

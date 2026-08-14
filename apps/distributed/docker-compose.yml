@@ -1,0 +1,121 @@
+name: dsh-distributed
+
+x-runtime: &runtime
+  build:
+    context: ../..
+    dockerfile: apps/distributed/Dockerfile
+  environment: &runtime-env
+    DATABASE_URL: postgres://dsh:dsh@postgres:5432/dsh
+    REDIS_URL: redis://redis:6379
+    COMMAND_STREAM: dsh:agent:commands
+    COMMAND_GROUP: dsh-workers
+    SESSION_LEASE_SECONDS: "30"
+    WORKER_HEARTBEAT_SECONDS: "2"
+    MOCK_LLM_DELAY_MS: "300"
+    DISTRIBUTED_LLM_MODE: ${DISTRIBUTED_LLM_MODE:-mock}
+    DEFAULT_PROVIDER: ${DEFAULT_PROVIDER:-distributed-mock}
+    DEFAULT_MODEL: ${DEFAULT_MODEL:-mock-agent}
+    DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+    DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+    AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-604800}
+    MODEL_CONFIG_ENCRYPTION_KEY: ${MODEL_CONFIG_ENCRYPTION_KEY:-distributed-local-development-key-change-me}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: dsh
+      POSTGRES_USER: dsh
+      POSTGRES_PASSWORD: dsh
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dsh -d dsh"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  api-1:
+    <<: *runtime
+    command: ["node", "--import", "tsx", "apps/distributed/src/api.ts"]
+    environment:
+      <<: *runtime-env
+      API_INSTANCE_ID: api-1
+      API_PORT: "3100"
+    ports:
+      - "3101:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  api-2:
+    <<: *runtime
+    command: ["node", "--import", "tsx", "apps/distributed/src/api.ts"]
+    environment:
+      <<: *runtime-env
+      API_INSTANCE_ID: api-2
+      API_PORT: "3100"
+    ports:
+      - "3102:3100"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+
+  web:
+    build:
+      context: ../..
+      dockerfile: apps/distributed/Web.Dockerfile
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+    ports:
+      - "20810:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  worker-1:
+    <<: *runtime
+    command: ["node", "--import", "tsx", "apps/distributed/src/worker.ts"]
+    environment:
+      <<: *runtime-env
+      WORKER_ID: worker-1
+
+  worker-2:
+    <<: *runtime
+    command: ["node", "--import", "tsx", "apps/distributed/src/worker.ts"]
+    environment:
+      <<: *runtime-env
+      WORKER_ID: worker-2
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -194,6 +194,43 @@ describe('connection client apply', () => {
     expect(seen.some(u => u.includes('/api/respond'))).toBe(true)
   })
 
+  it('WebApiClient unary calls work without secure-context randomUUID', async () => {
+    ;(globalThis as Win).location = {
+      hostname: '192.0.2.20', search: '', origin: 'http://192.0.2.20:20810',
+    }
+    vi.stubGlobal('crypto', {
+      getRandomValues(bytes: Uint8Array) {
+        return bytes.fill(0)
+      },
+    })
+    const client = (await mount()).api as WebApiClient
+    const original = globalThis.fetch
+    globalThis.fetch = async (_input: URL | RequestInfo, init?: RequestInit) => {
+      if (typeof init?.body !== 'string') throw new TypeError('expected a JSON string request body')
+      const body = JSON.parse(init.body) as { rpcId: string }
+      return Response.json({
+        type: 'server-response',
+        rpcId: body.rpcId,
+        result: {
+          ok: true,
+          value: {
+            version: 'test', cwd: '/workspace', provider: 'test', model: 'test',
+            attachedSessions: 0, canOpenPath: false,
+          },
+        },
+      })
+    }
+    try {
+      await expect(client.host.describe({})).resolves.toMatchObject({
+        rpcId: '00000000-0000-4000-8000-000000000000',
+        result: { ok: true, value: { cwd: '/workspace' } },
+      })
+    } finally {
+      globalThis.fetch = original
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('opens one WebSocket per downlink, parses frames, and aborts both without using fetch', async () => {
     ;(globalThis as Win).location = {
       hostname: 'localhost', search: '', origin: 'http://localhost:3080',

@@ -1,0 +1,56 @@
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body.distributed-auth-mode { margin: 0; color: #15242f; background: #eef3f4; }
+.auth-page { min-height: 100vh; display: grid; grid-template-columns: minmax(360px, 1.1fr) minmax(380px, .9fr); }
+.auth-hero { padding: clamp(48px, 8vw, 112px); color: #f5ffff; background: radial-gradient(circle at 15% 15%, #237b7e 0, transparent 34%), linear-gradient(145deg, #071b25 0%, #0c343d 60%, #15565c 100%); display: flex; flex-direction: column; justify-content: center; }
+.auth-brand { display: flex; align-items: center; gap: 12px; font-weight: 700; letter-spacing: .02em; }
+.auth-brand span { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #87dcda80; border-radius: 13px; color: #8fe5df; background: #ffffff0d; }
+.auth-hero h1 { max-width: 660px; margin: 72px 0 18px; font-family: Georgia, "Noto Serif SC", serif; font-size: clamp(42px, 5vw, 72px); line-height: 1.06; letter-spacing: -.04em; }
+.auth-hero > p { max-width: 570px; margin: 0; color: #c1dadd; font-size: 18px; line-height: 1.7; }
+.auth-points { margin-top: 72px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.auth-points div { padding-top: 18px; border-top: 1px solid #8fe5df55; }
+.auth-points b, .auth-points span { display: block; }
+.auth-points b { margin-bottom: 7px; color: #8fe5df; }
+.auth-points span { color: #a9c4c8; font-size: 13px; line-height: 1.5; }
+.auth-card { width: min(460px, calc(100% - 48px)); margin: auto; padding: 12px 44px 44px; border-radius: 24px; background: #fff; box-shadow: 0 28px 80px #18333d1f; }
+.auth-tabs { display: grid; grid-template-columns: 1fr 1fr; margin: 0 -20px 32px; padding: 6px; border-radius: 14px; background: #eef3f3; }
+.auth-tabs button { padding: 11px; border: 0; border-radius: 10px; color: #64777c; background: transparent; cursor: pointer; font-weight: 650; }
+.auth-tabs button.active { color: #0d5d62; background: #fff; box-shadow: 0 3px 12px #1e454a14; }
+.auth-form { display: grid; gap: 18px; }
+.auth-form.hidden, .deepseek-fields.hidden { display: none; }
+.auth-form h2 { margin: 0 0 5px; font-size: 26px; }
+.auth-form p { margin: 0; color: #758589; }
+.auth-form label, .model-form label { display: grid; gap: 8px; color: #354a50; font-size: 14px; font-weight: 650; }
+input, select { width: 100%; padding: 12px 13px; border: 1px solid #cbd8d9; border-radius: 10px; outline: 0; color: #183138; background: #fbfdfd; font: inherit; }
+input:focus, select:focus { border-color: #23858a; box-shadow: 0 0 0 3px #23858a1b; }
+label small { color: #809095; font-weight: 400; }
+button { font: inherit; }
+button.primary { padding: 13px 18px; border: 0; border-radius: 10px; color: white; background: #0d6d71; cursor: pointer; font-weight: 700; }
+button.primary:hover { background: #095b5f; }
+button:disabled { opacity: .55; cursor: wait; }
+.form-error { min-height: 20px; color: #b43131 !important; font-size: 13px; }
+.tenant-nav { position: fixed; z-index: 9999; top: 12px; right: 14px; height: 44px; display: flex; align-items: center; gap: 7px; padding: 5px 6px 5px 14px; border: 1px solid #d8e2e4; border-radius: 12px; color: #21363d; background: #fffffff0; box-shadow: 0 8px 26px #142e3717; backdrop-filter: blur(12px); }
+.tenant-copy { display: grid; min-width: 120px; margin-right: 4px; line-height: 1.1; }
+.tenant-copy strong { max-width: 180px; overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.tenant-copy span { max-width: 180px; overflow: hidden; color: #718287; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.tenant-nav button { padding: 7px 9px; border: 0; border-radius: 8px; color: #385159; background: #edf3f3; cursor: pointer; font-size: 12px; }
+.tenant-nav button:hover { color: #075e63; background: #dcebea; }
+.model-dialog { width: min(540px, calc(100vw - 32px)); padding: 0; border: 1px solid #d5dfe1; border-radius: 18px; color: #193139; background: white; box-shadow: 0 32px 100px #0b202c45; }
+.model-dialog::backdrop { background: #10273185; backdrop-filter: blur(3px); }
+.dialog-title { display: flex; align-items: center; justify-content: space-between; padding: 24px 28px 18px; border-bottom: 1px solid #e6eeee; }
+.dialog-title span { color: #75888c; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+.dialog-title h2 { margin: 3px 0 0; font-size: 23px; }
+.dialog-title button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #6b7c80; background: #eef3f3; cursor: pointer; font-size: 23px; }
+.model-form { display: grid; gap: 18px; padding: 24px 28px 28px; }
+.deepseek-fields { display: grid; gap: 18px; }
+.model-provider { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; border-radius: 10px; color: #687b80; background: #f1f5f5; font-size: 13px; }
+.model-provider strong { color: #275058; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.model-form .check-row { display: flex; align-items: center; gap: 9px; font-weight: 500; }
+.check-row input { width: 16px; height: 16px; }
+.model-help { margin: 0; padding: 11px 13px; border-left: 3px solid #47a7a5; color: #61777c; background: #f1f8f7; font-size: 12px; line-height: 1.6; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.dialog-actions button { padding: 10px 17px; border: 1px solid #d5dfe1; border-radius: 9px; background: white; cursor: pointer; }
+.dialog-actions button.primary { border-color: #0d6d71; background: #0d6d71; }
+.fatal-error { max-width: 680px; margin: 15vh auto; padding: 40px; }
+@media (max-width: 900px) { .auth-page { grid-template-columns: 1fr; } .auth-hero { min-height: 300px; padding: 40px; } .auth-hero h1 { margin-top: 42px; font-size: 42px; } .auth-points { margin-top: 38px; } .auth-card { margin: 34px auto; } }
+@media (max-width: 580px) { .auth-hero { min-height: 260px; padding: 28px 24px; } .auth-hero h1 { margin: 32px 0 12px; font-size: 34px; } .auth-hero > p { font-size: 15px; } .auth-points { display: none; } .auth-card { width: calc(100% - 24px); padding: 10px 24px 30px; } .tenant-copy { display: none; } .tenant-nav { top: 8px; right: 8px; } }
