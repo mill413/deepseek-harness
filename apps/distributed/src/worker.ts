@@ -3,6 +3,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { getOrCreateAnonymousUserId } from '@deepseek-ai/dsh-anonymous-user-id'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
+import BasicCompaction from '@deepseek-ai/dsh-compaction-basic'
+import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import LlmRuntime, {
   CallId,
   createUserMessage,
@@ -13,10 +15,12 @@ import LlmRuntime, {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { DeepSeekAdapter, resolveAdapterOptions } from '@deepseek-ai/dsh-llm-deepseek'
+import PlanMode from '@deepseek-ai/dsh-plan-mode'
 import SessionStore, { type SessionEvent } from '@deepseek-ai/dsh-session'
 import { apply as checkpointPolicy, inject as checkpointInject } from '@deepseek-ai/dsh-session-checkpoint-policy'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import { config } from './config.ts'
 import { migrate, one, pool, tx } from './db.ts'
 import { internalSessionId } from './identity.ts'
@@ -24,6 +28,7 @@ import { tenantModelConfig, type TenantModelConfig } from './model-config.ts'
 import * as OpenAiCompatible from './openai-compatible.ts'
 import PostgresSessionPersistence from './postgres-persistence.ts'
 import { connectRedis, ensureGroup, type RedisClient } from './redis.ts'
+import { settingValue } from './settings.ts'
 import * as WorkerExtensions from './worker-extensions.ts'
 import { workspaceRootPath } from './workspace-path.ts'
 
@@ -31,13 +36,15 @@ interface Command {
   tenant_id: string
   id: string
   session_id: string
-  payload: { text: string }
+  payload: { text?: string; action?: 'compact' }
   status: string
   cancel_requested: boolean
   provider: string
   model: string
   header: unknown
   workspace_id: string
+  agent_preset: string
+  permission_preset: string
 }
 
 interface StreamBatch {
@@ -124,6 +131,13 @@ class DistributedMockAdapter extends LlmAdapter {
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     await delay(config.mockDelayMs, options.signal)
+    if (options.purpose === 'compaction') {
+      for (const chunk of textChunks('Earlier turns verified the distributed Web API, settings, permissions, goals, feedback, and shared workspace.')) {
+        options.signal?.throwIfAborted()
+        yield chunk
+      }
+      return
+    }
     const last = options.messages.at(-1)
     const hasToolResult = last?.content.some(block => block.type === 'tool-result') === true
     const requestsWorkspaceProbe = last?.content.some(block =>
@@ -156,17 +170,40 @@ function finalAssistantText(events: readonly SessionEvent[]): string {
     .join('')
 }
 
-async function buildHarness(modelConfig: TenantModelConfig, tenantId: string, workspaceId: string): Promise<Context> {
+const PLAN_GUIDANCE = [
+  'You are in plan mode. Explore with non-mutating reads and produce a decision-complete implementation plan.',
+  'Do not edit files or execute the plan until the user leaves plan mode.',
+  'Use exit_plan_mode to present the complete markdown plan for review when the review channel is available.',
+].join(' ')
+
+async function buildHarness(
+  modelConfig: TenantModelConfig,
+  tenantId: string,
+  workspaceId: string,
+  agentPreset: string,
+  permissionPreset: string,
+): Promise<Context> {
   const ctx = new Context()
+  const agentLoopSettings = record(await settingValue(tenantId, modelConfig, 'agent-loop'))
+  const maxParallelToolCalls = agentLoopSettings?.['maxParallelToolCalls']
   await ctx.plugin(LlmRuntime)
   await ctx.plugin(SessionStore)
   await ctx.plugin(SystemPrompt, {})
   await ctx.plugin(ToolRuntime, { mode: 'native' })
+  if (agentPreset !== 'minimal') {
+    await ctx.plugin(TokenMeter, {})
+    await ctx.plugin(ToolResultPruner, { thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
+    await ctx.plugin(BasicCompaction, {})
+    await ctx.plugin(PlanMode, { section: PLAN_GUIDANCE })
+  }
   await ctx.plugin(AgentRegistry)
-  await ctx.plugin(AgentLoop, { agents: [] })
+  await ctx.plugin(AgentLoop, {
+    agents: [],
+    ...(typeof maxParallelToolCalls === 'number' ? { maxParallelToolCalls } : {}),
+  })
   await ctx.plugin(PostgresSessionPersistence)
   await ctx.plugin({ name: 'session-checkpoint-policy', inject: [...checkpointInject], apply: checkpointPolicy })
-  await ctx.plugin(WorkerExtensions, { tenantId, workspaceId })
+  await ctx.plugin(WorkerExtensions, { tenantId, workspaceId, permissionPreset })
   ctx.llm.registerAdapter(['distributed-mock'], new DistributedMockAdapter())
   if (modelConfig.mode === 'deepseek') {
     const options = resolveAdapterOptions({
@@ -238,7 +275,7 @@ async function releaseLease(redis: RedisClient, key: string, token: string): Pro
 async function loadCommand(tenantId: string, commandId: string): Promise<Command | undefined> {
   return one<Command>(`
     SELECT c.tenant_id, c.id, c.session_id, c.payload, c.status, c.cancel_requested,
-      s.provider, s.model, s.header, s.workspace_id
+      s.provider, s.model, s.header, s.workspace_id, s.agent_preset, s.permission_preset
     FROM agent_commands c
     JOIN sessions s ON s.tenant_id = c.tenant_id AND s.id = c.session_id
     JOIN tenant_workspaces w ON w.tenant_id = s.tenant_id AND w.id = s.workspace_id
@@ -291,7 +328,13 @@ async function executeCommand(redis: RedisClient, command: Command): Promise<voi
 
   let ctx: Context | undefined
   try {
-    ctx = await buildHarness(await tenantModelConfig(command.tenant_id), command.tenant_id, command.workspace_id)
+    ctx = await buildHarness(
+      await tenantModelConfig(command.tenant_id),
+      command.tenant_id,
+      command.workspace_id,
+      command.agent_preset,
+      command.permission_preset,
+    )
     const id = internalSessionId(command.tenant_id, command.session_id)
     const handle = command.header === null
       ? await ctx.agents.create({
@@ -301,15 +344,27 @@ async function executeCommand(redis: RedisClient, command: Command): Promise<voi
       })
       : await ctx.agents.resume({ resumeSessionId: id, agentOptions: { provider: command.provider, model: command.model } })
     activeAgents.set(`${command.tenant_id}/${command.session_id}`, handle.agent)
-    handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: command.payload.text }], source: { kind: 'user' } }))
-    await handle.agent.whenIdle()
-    await ctx.sessions.flush(handle.agent.session)
-    const turnEnd = handle.agent.session.events.findLast(event => event.type === 'turn/end')
-    if (turnEnd?.type === 'turn/end' && turnEnd.data.reason.kind === 'error') {
-      throw new Error(turnEnd.data.reason.error.message)
+    let finalText: string
+    if (command.payload.action === 'compact') {
+      const compaction = ctx.get('compaction')
+      if (compaction === undefined) throw new Error('compaction is not enabled for this agent preset')
+      const result = await compaction.compactNow(handle.agent, new AbortController().signal)
+      finalText = result === null
+        ? 'No compactable history yet.'
+        : `Compacted ${result.shadowedSeqs.length} history items (~${result.shadowedTokenCount} tokens).`
+    } else {
+      const prompt = command.payload.text
+      if (typeof prompt !== 'string' || prompt.trim() === '') throw new Error('message command has no text')
+      handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }))
+      await handle.agent.whenIdle()
+      const turnEnd = handle.agent.session.events.findLast(event => event.type === 'turn/end')
+      if (turnEnd?.type === 'turn/end' && turnEnd.data.reason.kind === 'error') {
+        throw new Error(turnEnd.data.reason.error.message)
+      }
+      finalText = finalAssistantText(handle.agent.session.events)
+      if (finalText === '') throw new Error('agent completed without assistant text')
     }
-    const finalText = finalAssistantText(handle.agent.session.events)
-    if (finalText === '') throw new Error('agent completed without assistant text')
+    await ctx.sessions.flush(handle.agent.session)
     await pool.query(`
       UPDATE agent_commands SET status = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'completed' END,
         final_text = $4, heartbeat_at = now(), completed_at = now()

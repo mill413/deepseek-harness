@@ -21,6 +21,8 @@ export interface Config {
   tenantId: string
   /** Workspace selected by the session. */
   workspaceId: string
+  /** Session permission preset enforced by the workspace execution service. */
+  permissionPreset: string
 }
 
 /**

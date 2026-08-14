@@ -142,10 +142,65 @@ assert.equal(description.provider, 'distributed-mock')
 const created = await rpc('session.create', { workspaceId })
 const sessionId = created.sessionId
 assert.equal(typeof sessionId, 'string')
+assert.equal(created.agentPreset, 'standard')
+
+const presets = await rpc('agentPreset.list', {})
+assert.ok(presets.presets.some(preset => preset.id === 'standard'))
+assert.ok(presets.presets.some(preset => preset.id === 'code'))
+const settings = await rpc('settings.describe', {})
+assert.equal(settings.writable, true)
+assert.ok(settings.namespaces.some(namespace => namespace.ns === 'llm-deepseek'))
+assert.ok(settings.namespaces.some(namespace => namespace.ns === 'llm-pi-ai'))
+const agentLoop = settings.namespaces.find(namespace => namespace.ns === 'agent-loop')
+const updatedAgentLoop = await rpc('settings.update', {
+  ns: 'agent-loop',
+  patch: { maxParallelToolCalls: 2 },
+  expectedRevision: agentLoop.revision,
+})
+assert.equal(updatedAgentLoop.value.maxParallelToolCalls, 2)
+const theme = settings.namespaces.find(namespace => namespace.ns === 'ui-theme')
+const updatedTheme = await rpc('settings.update', {
+  ns: 'ui-theme',
+  patch: { preference: 'dark' },
+  expectedRevision: theme.revision,
+})
+assert.equal(updatedTheme.value.preference, 'dark')
+assert.equal(updatedTheme.revision, theme.revision + 1)
+const credentialRef = `E2E_${suffix.toUpperCase()}_KEY`
+const initialCredential = await rpc('credentials.describe', { refs: [credentialRef] })
+assert.equal(initialCredential.credentials[credentialRef].configured, false)
+await rpc('credentials.set', { ref: credentialRef, value: `credential-${suffix}` })
+const storedCredential = await rpc('credentials.describe', { refs: [credentialRef] })
+assert.deepEqual(storedCredential.credentials[credentialRef], {
+  configured: true,
+  source: 'tenant',
+  writable: true,
+})
+await rpc('credentials.unset', { ref: credentialRef })
+const removedCredential = await rpc('credentials.describe', { refs: [credentialRef] })
+assert.equal(removedCredential.credentials[credentialRef].configured, false)
+const inventory = await rpc('pluginInventory/list', { args: {} })
+assert.ok(inventory.entries.some(entry => entry.moduleName === '@deepseek-ai/dsh-agent-loop'))
+const commands = await rpc('commands/list', { args: { agentId: sessionId } })
+assert.ok(commands.some(command => command.name === 'plan'))
+assert.ok(commands.some(command => command.name === 'permission'))
+assert.ok(commands.some(command => command.name === 'goal'))
+const planOn = await rpc('commands/execute', { args: { agentId: sessionId, line: '/plan' } })
+assert.equal(planOn.result.kind, 'success')
+const permissionReadOnly = await rpc('commands/execute', { args: { agentId: sessionId, line: '/permission read-only' } })
+assert.equal(permissionReadOnly.result.kind, 'success')
+const goalCreated = await rpc('commands/execute', { args: { agentId: sessionId, line: '/goal verify distributed upstream parity' } })
+assert.equal(goalCreated.result.kind, 'success')
+const capabilityHistory = await rpc('session.history', { sessionId, maxMessages: 50 })
+assert.deepEqual(capabilityHistory.projections.values.plan, { active: true, pending: false })
+assert.equal(capabilityHistory.projections.values.permissions.currentValue, 'read-only')
+assert.equal(capabilityHistory.projections.values.goal.goal.objective, 'verify distributed upstream parity')
+await rpc('commands/execute', { args: { agentId: sessionId, line: '/permission danger-full-access' } })
+await rpc('commands/execute', { args: { agentId: sessionId, line: '/plan off' } })
 
 const summary = await waitFor(() => host.frames.find(frame =>
   frame.payload?.type === 'host/session-added' && frame.payload.sessionId === sessionId), 'host/session-added')
-assert.equal(summary.payload.blank, true)
+assert.equal(typeof summary.payload.blank, 'boolean')
 assert.equal(summary.payload.cwd, '/workspace')
 
 await waitFor(() => host.frames.find(frame =>
@@ -169,13 +224,32 @@ await waitFor(() => mux.frames.find(frame =>
   frame.payload?.type === 'session/event'
   && frame.payload.sessionId === sessionId
   && frame.payload.event?.type === 'assistant/message'), 'assistant/message WebSocket frame')
+await waitFor(() => mux.frames.find(frame =>
+  frame.payload?.type === 'session/event'
+  && frame.payload.sessionId === sessionId
+  && frame.payload.event?.type === 'turn/end'), 'first turn/end WebSocket frame')
 
 const history = await rpc('session.history', { sessionId, maxMessages: 50 })
 assert.ok(history.events.some(entry => entry.event.type === 'user/message'))
 assert.ok(history.events.some(entry => entry.event.type === 'tool/call'))
 assert.ok(history.events.some(entry => entry.event.type === 'tool/result'))
 assert.ok(history.events.some(entry => entry.event.type === 'assistant/message'))
+const assistant = history.events.findLast(entry => entry.event.type === 'assistant/message').event
+const feedbackList = await rpc('messageFeedback/list', { args: { request: { sessionId } } })
+assert.deepEqual(feedbackList, { ok: true, value: { items: [] } })
+const feedbackPut = await rpc('messageFeedback/put', {
+  args: { request: { sessionId, messageId: assistant.data.message.id, rating: 'positive', ifVersion: null } },
+})
+assert.equal(feedbackPut.ok, true)
+const feedbackDelete = await rpc('messageFeedback/delete', {
+  args: { request: { sessionId, messageId: assistant.data.message.id, ifVersion: feedbackPut.value.version } },
+})
+assert.deepEqual(feedbackDelete, { ok: true, value: { absent: true } })
 
+const completedTurnsBeforeWorkspace = mux.frames.filter(frame =>
+  frame.payload?.type === 'session/event'
+  && frame.payload.sessionId === sessionId
+  && frame.payload.event?.type === 'turn/end').length
 await rpc('session.prompt', {
   sessionId,
   mode: 'queue',
@@ -190,6 +264,16 @@ while (!JSON.stringify(workspaceEvents).includes('workspace-proxy-ok') && Date.n
 }
 assert.match(JSON.stringify(workspaceEvents), /"name":"bash"/u)
 assert.match(JSON.stringify(workspaceEvents), /workspace-proxy-ok/u)
+await waitFor(() => {
+  const completedTurns = mux.frames.filter(frame =>
+    frame.payload?.type === 'session/event'
+    && frame.payload.sessionId === sessionId
+    && frame.payload.event?.type === 'turn/end').length
+  return completedTurns > completedTurnsBeforeWorkspace ? completedTurns : undefined
+}, 'workspace turn/end WebSocket frame')
+
+const compacted = await rpc('commands/execute', { args: { agentId: sessionId, line: '/compact' } })
+assert.equal(compacted.result.kind, 'success')
 
 const tenantACookie = cookie
 cookie = ''

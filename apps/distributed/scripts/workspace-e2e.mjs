@@ -25,6 +25,7 @@ async function execute(workspaceId, name, args) {
     callId: randomUUID(),
     name,
     arguments: args,
+    permissionPreset: 'danger-full-access',
   })
   assert.equal(result.isError, false, JSON.stringify(result))
   return result
@@ -89,6 +90,7 @@ const missingInB = await post('/internal/v1/tools/execute', {
   callId: randomUUID(),
   name: 'read',
   arguments: { file_path: 'shared.txt' },
+  permissionPreset: 'danger-full-access',
 })
 assert.equal(missingInB.isError, true)
 await execute(workspaceB, 'write', { file_path: 'shared.txt', content: 'tenant B' })
@@ -102,6 +104,7 @@ await post('/internal/v1/tools/execute', {
   callId: randomUUID(),
   name: 'read',
   arguments: { file_path: '/etc/passwd' },
+  permissionPreset: 'danger-full-access',
 }, 400)
 
 console.log(JSON.stringify({

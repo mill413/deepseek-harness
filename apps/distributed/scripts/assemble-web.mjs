@@ -1,40 +1,68 @@
 import { createHash } from 'node:crypto'
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 const repositoryRoot = resolve(import.meta.dirname, '../../..')
 const outputRoot = resolve(process.argv[2] ?? join(repositoryRoot, 'apps/distributed/.web-root'))
 
-const pluginDirectories = [
-  'packages/typert/registry',
-  'packages/client/connection',
-  'packages/api/gateway',
-  'packages/api/remotes',
-  'packages/client/ui-settings',
-  'packages/client/runtime',
-  'packages/client/ui-theme',
-  'packages/client/locale',
-  'packages/client/ui-layout',
-  'packages/client/ui-sidebar',
-  'packages/client/ui-conversation',
-  'packages/client/ui-tool',
-  'packages/client/ui-workflow-run',
-  'packages/client/ui-workspace',
-  'packages/client/ui-input-trigger',
-  'packages/client/ui-commands',
-  'packages/client/ui-model-selection',
+const compositionPaths = [
+  'packages/bundle/base/cordis.patch.yml',
+  'packages/bundle/web-app/cordis.patch.yml',
 ]
+
+// The upstream host auto-selects a native or browser directory picker. The
+// distributed Web always uses the browser picker because the Host is remote.
+const distributedClientRows = ['@deepseek-ai/dsh-client-ui-directory-picker-browse']
+
+async function packageManifests(directory) {
+  const manifests = []
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name === 'node_modules') continue
+    const child = join(directory, entry.name)
+    try {
+      const manifestPath = join(child, 'package.json')
+      const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+      manifests.push({ directory: child, manifest })
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+      manifests.push(...await packageManifests(child))
+    }
+  }
+  return manifests
+}
+
+const manifests = await packageManifests(join(repositoryRoot, 'packages'))
+const manifestByName = new Map(manifests
+  .filter(entry => typeof entry.manifest.name === 'string')
+  .map(entry => [entry.manifest.name, entry]))
+const composedNames = []
+for (const relativePath of compositionPaths) {
+  const composition = await readFile(join(repositoryRoot, relativePath), 'utf8')
+  for (const match of composition.matchAll(/^\s+name:\s+'([^']+)'/gmu)) composedNames.push(match[1])
+}
+composedNames.push(...distributedClientRows)
+
+const pluginEntries = []
+const selectedNames = new Set()
+for (const packageName of composedNames) {
+  if (selectedNames.has(packageName)) continue
+  const entry = manifestByName.get(packageName)
+  if (entry?.manifest.dsh?.client === undefined) continue
+  selectedNames.add(packageName)
+  pluginEntries.push(entry)
+}
+
+const platformSource = await readFile(join(repositoryRoot, 'packages/client/web/src/platform.ts'), 'utf8')
+const platformModules = new Set([...platformSource.matchAll(/'(@deepseek-ai\/[^']+|react(?:\/[^']+)?)'/gu)].map(match => match[1]))
 
 await mkdir(outputRoot, { recursive: true })
 await cp(join(repositoryRoot, 'apps/web/dist'), outputRoot, { recursive: true })
 
 const entries = []
-for (const relativeDirectory of pluginDirectories) {
-  const directory = join(repositoryRoot, relativeDirectory)
-  const manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'))
+for (const { directory, manifest } of pluginEntries) {
   const declaration = manifest.dsh?.client
   if (typeof manifest.name !== 'string' || declaration?.platform !== 'web') {
-    throw new Error(`${relativeDirectory} is not a Web client plugin`)
+    throw new Error(`${manifest.name ?? directory} is not a Web client plugin`)
   }
   const source = join(directory, 'lib/client.js')
   const rev = createHash('sha256').update(await readFile(source)).digest('hex').slice(0, 12)
@@ -53,7 +81,7 @@ for (const relativeDirectory of pluginDirectories) {
 
 const pluginIds = new Set(entries.map(entry => entry.id))
 for (const entry of entries) {
-  const missing = entry.inject.filter(dependency => !pluginIds.has(dependency))
+  const missing = entry.inject.filter(dependency => !pluginIds.has(dependency) && !platformModules.has(dependency))
   if (missing.length > 0) {
     throw new Error(`${entry.id} has missing Web plugin dependencies: ${missing.join(', ')}`)
   }

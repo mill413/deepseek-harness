@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { ContentBlock, ToolSchema } from '@deepseek-ai/dsh-llm'
-import type { ToolDefinition, ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { createUserMessage, type ContentBlock, type ToolSchema } from '@deepseek-ai/dsh-llm'
+import { defineTool, type ToolDefinition, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import { config } from './config.ts'
 
 /** Stable Cordis plugin name used by diagnostics. */
@@ -15,11 +15,23 @@ export interface Config {
   tenantId: string
   /** Workspace whose catalog and executions are exposed. */
   workspaceId: string
+  /** Permission preset pinned on the owning session. */
+  permissionPreset: string
 }
 
-interface WorkspaceCatalog {
+export interface WorkspaceSkill {
+  name: string
+  description: string
+  whenToUse?: string
+  modelInvocable: boolean
+  content: string
+  directory: string
+}
+
+export interface WorkspaceCatalog {
   root: string
   tools: ToolSchema[]
+  skills: WorkspaceSkill[]
   guidance: Array<{ name: string; order: number; text: string }>
 }
 
@@ -59,10 +71,15 @@ async function post(path: string, body: unknown, signal?: AbortSignal): Promise<
 
 function parseCatalog(value: unknown): WorkspaceCatalog {
   const body = record(value)
-  if (body === undefined || typeof body['root'] !== 'string' || !Array.isArray(body['tools']) || !Array.isArray(body['guidance'])) {
+  if (body === undefined || typeof body['root'] !== 'string' || !Array.isArray(body['tools'])
+    || !Array.isArray(body['skills']) || !Array.isArray(body['guidance'])) {
     throw new Error('workspace service returned an invalid tool catalog')
   }
   return body as unknown as WorkspaceCatalog
+}
+
+export async function workspaceCatalogFor(tenantId: string, workspaceId: string): Promise<WorkspaceCatalog> {
+  return parseCatalog(await post('/internal/v1/catalog', { tenantId, workspaceId }))
 }
 
 function parseExecutionResult(value: unknown): ToolExecutionResult {
@@ -82,8 +99,8 @@ function parseExecutionResult(value: unknown): ToolExecutionResult {
  * @param pluginConfig - selected tenant and workspace identity.
  */
 export async function apply(ctx: Context, pluginConfig: Config): Promise<void> {
-  const { tenantId, workspaceId } = pluginConfig
-  const catalog = parseCatalog(await post('/internal/v1/catalog', { tenantId, workspaceId }))
+  const { tenantId, workspaceId, permissionPreset } = pluginConfig
+  const catalog = await workspaceCatalogFor(tenantId, workspaceId)
   const remoteNames = new Set(catalog.tools.map(tool => tool.name))
   for (const section of catalog.guidance) {
     ctx.systemPrompt.section({ name: section.name, order: section.order, text: section.text })
@@ -96,6 +113,7 @@ export async function apply(ctx: Context, pluginConfig: Config): Promise<void> {
       callId: exec.callId,
       name: exec.name,
       arguments: exec.arguments,
+      permissionPreset,
     }, exec.signal))
     if (result.isError) return result
     return {
@@ -124,4 +142,57 @@ export async function apply(ctx: Context, pluginConfig: Config): Promise<void> {
     }
     ctx.tools.register(definition)
   }
+  if (catalog.skills.length > 0) {
+    ctx.systemPrompt.section({
+      name: 'skills:catalog',
+      order: 170,
+      text: [
+        '<available_skills>',
+        ...catalog.skills.filter(skill => skill.modelInvocable)
+          .map(skill => `- ${skill.name}: ${skill.description}`),
+        '</available_skills>',
+        'Call the skill tool with the exact name before following a matching skill.',
+      ].join('\n'),
+    })
+  }
+  ctx.tools.register(defineTool({
+    name: 'skill',
+    description: 'Load full instructions for an available workspace skill.',
+    parameters: { name: { type: 'string', required: true } },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', required: true },
+          content: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: `<skill_content name="${value.name}">\n${value.content}\n</skill_content>` }],
+    },
+    execute(args) {
+      const skill = catalog.skills.find(candidate => candidate.name === args.name && candidate.modelInvocable)
+      if (skill === undefined) throw new Error(`skill "${args.name}" is unknown or unavailable to the model`)
+      return Promise.resolve({ name: skill.name, content: skill.content })
+    },
+  }))
+  ctx.on('agent/pre-step', async ({ messages }, next) => {
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    const requested = new Set<string>()
+    for (const message of messages) {
+      for (const block of message.content) {
+        if (block.type !== 'text') continue
+        const match = /^\/([a-z0-9]+(?:-[a-z0-9]+)*)(?:\s|$)/u.exec(block.text.trimStart())
+        if (match?.[1] !== undefined) requested.add(match[1])
+      }
+    }
+    const injections = catalog.skills
+      .filter(skill => requested.has(skill.name))
+      .map(skill => createUserMessage({
+        content: [{ type: 'text', text: `<skill_content name="${skill.name}">\n${skill.content}\n</skill_content>` }],
+        source: { kind: 'plugin', plugin: 'distributed-workspace-skills', form: 'instructions', summary: `Skill ${skill.name}` },
+      }))
+    return injections.length === 0 ? decision : { ...decision, messages: [...decision.messages, ...injections] }
+  })
 }

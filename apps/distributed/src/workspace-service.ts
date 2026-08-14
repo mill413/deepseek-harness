@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto'
-import { mkdir, realpath } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -30,6 +30,16 @@ interface ToolRequest {
   callId: string
   name: string
   arguments: unknown
+  permissionPreset: string
+}
+
+interface WorkspaceSkill {
+  name: string
+  description: string
+  whenToUse?: string
+  modelInvocable: boolean
+  content: string
+  directory: string
 }
 
 const contexts = new Map<string, Promise<WorkspaceContext>>()
@@ -91,6 +101,7 @@ function parseToolRequest(value: unknown): ToolRequest {
     callId: requiredString(body, 'callId'),
     name: requiredString(body, 'name'),
     arguments: body['arguments'],
+    permissionPreset: requiredString(body, 'permissionPreset'),
   }
 }
 
@@ -179,13 +190,75 @@ async function catalog(tenantId: string, workspaceId: string): Promise<unknown> 
   return {
     root,
     tools: ctx.tools.schemas(),
+    skills: await workspaceSkills(root),
     guidance: assembly.sections
       .filter(section => section.name.startsWith('tool:'))
       .map(section => ({ name: section.name, order: assembly.sections.indexOf(section) + 100, text: section.text })),
   }
 }
 
+function frontmatter(content: string): { attributes: Record<string, string>; body: string } {
+  if (!content.startsWith('---\n')) return { attributes: {}, body: content }
+  const end = content.indexOf('\n---\n', 4)
+  if (end < 0) return { attributes: {}, body: content }
+  const attributes: Record<string, string> = {}
+  for (const line of content.slice(4, end).split('\n')) {
+    const match = /^([a-zA-Z0-9_-]+):\s*(.*)$/u.exec(line)
+    if (match?.[1] !== undefined && match[2] !== undefined) {
+      attributes[match[1]] = match[2].trim().replace(/^['"]|['"]$/gu, '')
+    }
+  }
+  return { attributes, body: content.slice(end + 5).trim() }
+}
+
+async function workspaceSkills(root: string): Promise<WorkspaceSkill[]> {
+  const winners = new Map<string, WorkspaceSkill>()
+  for (const relativeRoot of ['.dsh/skills', '.agents/skills']) {
+    const skillsRoot = resolve(root, relativeRoot)
+    let entries
+    try {
+      entries = await readdir(skillsRoot, { withFileTypes: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+      const path = entry.isDirectory()
+        ? resolve(skillsRoot, entry.name, 'SKILL.md')
+        : entry.isFile() && entry.name.endsWith('.md')
+          ? resolve(skillsRoot, entry.name)
+          : undefined
+      if (path === undefined) continue
+      let raw: string
+      try {
+        raw = await readFile(path, 'utf8')
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      const parsed = frontmatter(raw)
+      const fallback = entry.isDirectory() ? entry.name : entry.name.slice(0, -3)
+      const name = parsed.attributes['name'] ?? fallback
+      if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(name) || winners.has(name)) continue
+      const description = parsed.attributes['description'] ?? `Workspace skill ${name}`
+      winners.set(name, {
+        name,
+        description,
+        ...(parsed.attributes['when-to-use'] === undefined ? {} : { whenToUse: parsed.attributes['when-to-use'] }),
+        modelInvocable: parsed.attributes['disable-model-invocation'] !== 'true',
+        content: parsed.body,
+        directory: dirname(path),
+      })
+    }
+  }
+  return [...winners.values()].sort((left, right) => left.name.localeCompare(right.name))
+}
+
 async function executeTool(tool: ToolRequest, signal: AbortSignal): Promise<ToolExecutionResult> {
+  if (tool.permissionPreset === 'read-only'
+    && ['bash', 'write', 'edit', 'str_replace_editor'].includes(tool.name)) {
+    throw new HttpError(403, `tool ${tool.name} is unavailable in read-only mode`)
+  }
   const workspace = await workspaceContext(tool.tenantId, tool.workspaceId)
   const args = await normalizedArguments(workspace.root, tool.name, tool.arguments)
   return workspace.ctx.tools.execute({
