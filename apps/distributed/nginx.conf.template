@@ -3,7 +3,7 @@ resolver 127.0.0.11 valid=10s ipv6=off;
 upstream distributed_api {
   zone distributed_api 64k;
   least_conn;
-  server api-1:3100 resolve;
+  server api:3100 resolve;
 }
 
 server {

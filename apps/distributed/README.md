@@ -7,35 +7,34 @@ This app turns the in-process Harness into a small multi-tenant API–Redis–Wo
 ```mermaid
 flowchart LR
   B[Browser] --> W[Web / Nginx]
-  C[REST client] --> A[API]
-  W --> A
+  C[REST client] --> W
+  W --> A[API replicas]
   A --> P[(PostgreSQL)]
   A --> R[(Redis)]
-  R --> W1[Worker 1]
-  R --> W2[Worker 2]
-  W1 --> P
-  W2 --> P
-  W1 --> S[Workspace service]
-  W2 --> S
+  R --> WK[Worker replicas]
+  WK --> P
+  WK --> S[Workspace service]
   S --> V[(Persistent workspace volume)]
 ```
 
-Browser users register or log in with a tenant slug, username, and password. The API stores scrypt password hashes and opaque browser-session hashes, then returns an HttpOnly, SameSite cookie that authenticates both HTTP and WebSocket traffic. Nginx removes caller-supplied identity headers. Every session, command, and event query includes the authenticated tenant key, and user-facing session operations also include the owner key. The direct API port retains `x-tenant-id` and `x-user-id` as a test/service identity adapter; do not expose it to untrusted networks.
+Browser users register or log in with a tenant slug, username, and password. The API stores scrypt password hashes and opaque browser-session hashes, then returns an HttpOnly, SameSite cookie that authenticates both HTTP and WebSocket traffic. Nginx removes caller-supplied identity headers. Every session, command, and event query includes the authenticated tenant key, and user-facing session operations also include the owner key. API port 3100 remains internal to the Compose network; port 20810 is the only host ingress.
 
 ## Run and test
 
-From the repository root, start the fixed one-API/two-Worker topology and run the distributed scheduling test:
+From the repository root, start two API replicas and two Worker replicas, then run the distributed scheduling test inside the Compose network:
 
 ```sh
-docker compose -f apps/distributed/docker-compose.yml up -d --build
-node apps/distributed/scripts/e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml up -d --build --remove-orphans --scale api=2 --scale worker=2
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://api:3100 -e DSH_WEB_URL=http://web -e DSH_EXPECT_API_REPLICAS=2 -e DSH_EXPECT_WORKER_REPLICAS=2 api node apps/distributed/scripts/e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T workspace node apps/distributed/scripts/workspace-e2e.mjs
-docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=http://web api-1 node apps/distributed/scripts/web-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_WEB_URL=http://web api node apps/distributed/scripts/web-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml --profile test up -d openai-mock
-node apps/distributed/scripts/openai-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://web api node apps/distributed/scripts/openai-e2e.mjs
 ```
 
-The repository's native Web UI is available at `http://127.0.0.1:20810`. First use **Create tenant** to create a tenant administrator, then sign in with its tenant slug. Registration creates an isolated **Default** workspace; select it and type in the composer to start a conversation. Existing tenants and sessions are migrated into their own defaults. The independent Nginx container serves the built `apps/web` shell and the complete upstream Web client composition, forwards authenticated HTTP RPCs and WebSocket streams to the API, and never runs an Agent. The API also listens on `http://127.0.0.1:3101`. The working distributed adapters cover workspace and session management, durable history, prompts and cancellation, live events, tools, settings, encrypted credentials, model selection, agent presets, permission and plan modes, goals, message feedback, skills, and context compaction. The deterministic adapter deliberately makes a native `worker_probe` tool call before answering, while the `[workspace-e2e]` probe calls the remote `bash` tool, so tests cover the real Agent Loop, remote tool dispatch, checkpoint persistence, multi-Worker distribution, tenant isolation, session resume, and the Web–API compatibility protocol without consuming model credits.
+The repository's native Web UI is available at `http://127.0.0.1:20810`. First use **Create tenant** to create a tenant administrator, then sign in with its tenant slug. Registration creates an isolated **Default** workspace; select it and type in the composer to start a conversation. Existing tenants and sessions are migrated into their own defaults. The independent Nginx container serves the built `apps/web` shell and the complete upstream Web client composition, discovers all `api` service replicas through Compose DNS, forwards authenticated HTTP RPCs and WebSocket streams, and never runs an Agent. The working distributed adapters cover workspace and session management, durable history, prompts and cancellation, live events, tools, settings, encrypted credentials, model selection, agent presets, permission and plan modes, goals, message feedback, skills, and context compaction. The deterministic adapter deliberately makes a native `worker_probe` tool call before answering, while the `[workspace-e2e]` probe calls the remote `bash` tool, so tests cover the real Agent Loop, remote tool dispatch, checkpoint persistence, API ingress distribution, multi-Worker distribution, tenant isolation, session resume, and the Web–API compatibility protocol without consuming model credits.
+
+Replica counts are deployment parameters rather than Compose service definitions. Re-run `docker compose -f apps/distributed/docker-compose.yml up -d --scale api=3 --scale worker=4` to simulate Kubernetes Deployment scaling. Container hostnames produce unique API and Worker instance ids, Nginx re-resolves the `api` service name, and the Redis consumer group assigns commands across live Workers. Keep at least one API and one Worker replica; scaling the Workspace service is unsupported because it exclusively owns the shared volume and long-lived background-job registry.
 
 One internal Workspace service owns the `workspace-data` volume. A PostgreSQL Workspace id maps deterministically to `/workspaces/<tenant-id>/<workspace-id>`; API and Worker containers do not mount that volume. Workers register RPC proxies for the upstream `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `bash`, `job_output`, `job_list`, and `job_kill` definitions, and the original upstream implementations execute inside the Workspace container. Foreground and background shell processes, ripgrep searches, and file mutations therefore share the same persistent directory across both Workers and across Workspace-service restarts. Keep `WORKSPACE_SERVICE_TOKEN` equal on Workers and the Workspace service and do not publish port 3200.
 
@@ -59,7 +58,7 @@ MODEL_CONFIG_ENCRYPTION_KEY=replace-with-a-long-random-production-secret
 ```
 
 ```sh
-docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build
+docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build --scale api=2 --scale worker=2
 ```
 
 New sessions receive the tenant's configured default; existing sessions retain their stored provider and model until selected again. Keep `MODEL_CONFIG_ENCRYPTION_KEY` stable across the API and all Workers and across restarts, or stored tenant keys cannot be decrypted. Use a secret manager in production rather than the Compose development default.

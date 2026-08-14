@@ -18,8 +18,8 @@ function authMarkup() {
         <h1>你的团队 Agent 工作台</h1>
         <p>租户数据隔离、分布式任务执行，以及集中管理的模型连接配置。</p>
         <div class="auth-points">
-          <div><b>1× API</b><span>统一认证与请求接入</span></div>
-          <div><b>2× Worker</b><span>Redis 队列分布式执行</span></div>
+          <div><b>N× API</b><span>Compose DNS 动态分流</span></div>
+          <div><b>N× Worker</b><span>Redis 消费组弹性执行</span></div>
           <div><b>PostgreSQL</b><span>租户会话与历史持久化</span></div>
         </div>
       </section>

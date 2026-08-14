@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 
-const baseUrl = process.env.DSH_API_URL ?? 'http://127.0.0.1:3101'
+const baseUrl = process.env.DSH_API_URL ?? 'http://127.0.0.1:20810'
 const providerBaseUrl = process.env.DSH_OPENAI_BASE_URL ?? 'http://openai-mock:3300/v1/chat/completions'
 let cookie = ''
 

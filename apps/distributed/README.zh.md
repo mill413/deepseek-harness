@@ -7,35 +7,34 @@
 ```mermaid
 flowchart LR
   B[Browser] --> W[Web / Nginx]
-  C[REST client] --> A[API]
-  W --> A
+  C[REST client] --> W
+  W --> A[API replicas]
   A --> P[(PostgreSQL)]
   A --> R[(Redis)]
-  R --> W1[Worker 1]
-  R --> W2[Worker 2]
-  W1 --> P
-  W2 --> P
-  W1 --> S[Workspace service]
-  W2 --> S
+  R --> WK[Worker replicas]
+  WK --> P
+  WK --> S[Workspace service]
   S --> V[(Persistent workspace volume)]
 ```
 
-浏览器用户使用租户标识、用户名和密码注册或登录。API 保存 scrypt 密码哈希与不透明浏览器会话哈希，并返回用于认证 HTTP 和 WebSocket 流量的 HttpOnly、SameSite Cookie。Nginx 会清除调用方伪造的身份请求头。每条会话、命令和事件查询都包含已认证租户键，面向用户的会话操作还包含所有者键。API 直连端口仍保留 `x-tenant-id` 和 `x-user-id` 作为测试/服务身份适配器，不应暴露给不可信网络。
+浏览器用户使用租户标识、用户名和密码注册或登录。API 保存 scrypt 密码哈希与不透明浏览器会话哈希，并返回用于认证 HTTP 和 WebSocket 流量的 HttpOnly、SameSite Cookie。Nginx 会清除调用方伪造的身份请求头。每条会话、命令和事件查询都包含已认证租户键，面向用户的会话操作还包含所有者键。API 的 3100 端口仅在 Compose 网络内可见，20810 是唯一宿主机入口。
 
 ## 运行与测试
 
-在仓库根目录启动固定的单 API、双 Worker 拓扑，并运行分布式调度测试：
+在仓库根目录启动两个 API 副本和两个 Worker 副本，然后在 Compose 网络内运行分布式调度测试：
 
 ```sh
-docker compose -f apps/distributed/docker-compose.yml up -d --build
-node apps/distributed/scripts/e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml up -d --build --remove-orphans --scale api=2 --scale worker=2
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://api:3100 -e DSH_WEB_URL=http://web -e DSH_EXPECT_API_REPLICAS=2 -e DSH_EXPECT_WORKER_REPLICAS=2 api node apps/distributed/scripts/e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T workspace node apps/distributed/scripts/workspace-e2e.mjs
-docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=http://web api-1 node apps/distributed/scripts/web-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_WEB_URL=http://web api node apps/distributed/scripts/web-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml --profile test up -d openai-mock
-node apps/distributed/scripts/openai-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml exec -T --index 1 -e DSH_API_URL=http://web api node apps/distributed/scripts/openai-e2e.mjs
 ```
 
-仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，并把经过认证的 HTTP RPC 与 WebSocket 流量转发到 API；Web 容器本身不运行 agent。API 还监听 `http://127.0.0.1:3101`。可工作的分布式适配器覆盖工作区与会话管理、持久历史、提示词与取消、实时事件、工具、设置、加密凭据、模型选择、agent 预设、权限与计划模式、目标、消息反馈、skill 和上下文压缩。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 agent loop、远程工具派发、检查点持久化、多 Worker 分配、租户隔离、会话恢复和 Web–API 兼容协议。
+仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，通过 Compose DNS 发现全部 `api` 服务副本，并转发经过认证的 HTTP RPC 与 WebSocket 流量；Web 容器本身不运行 agent。可工作的分布式适配器覆盖工作区与会话管理、持久历史、提示词与取消、实时事件、工具、设置、加密凭据、模型选择、agent 预设、权限与计划模式、目标、消息反馈、skill 和上下文压缩。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 agent loop、远程工具派发、检查点持久化、API 入口分流、多 Worker 分配、租户隔离、会话恢复和 Web–API 兼容协议。
+
+副本数是部署参数，不再写死为 Compose 服务。重新执行 `docker compose -f apps/distributed/docker-compose.yml up -d --scale api=3 --scale worker=4` 即可模拟 Kubernetes Deployment 扩缩容。容器 hostname 会生成唯一的 API 与 Worker 实例 ID，Nginx 会重新解析 `api` 服务名，Redis consumer group 会把命令分配给存活 Worker。至少保留一个 API 与一个 Worker；Workspace 服务独占共享卷和长生命周期后台任务注册表，因此不支持横向扩展。
 
 一个内部 Workspace 服务独占 `workspace-data` 卷。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。Worker 会为上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` 定义注册 RPC 代理，而原始上游实现在 Workspace 容器内执行。因此前台与后台 shell 进程、ripgrep 搜索和文件修改可在两个 Worker 之间共享同一个持久目录，并能跨 Workspace 服务重启保留。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
 
@@ -59,7 +58,7 @@ MODEL_CONFIG_ENCRYPTION_KEY=replace-with-a-long-random-production-secret
 ```
 
 ```sh
-docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build
+docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build --scale api=2 --scale worker=2
 ```
 
 新会话使用所属租户的默认值；已有会话继续保留数据库中存储的提供方和模型，直到重新选择。API、所有 Worker 以及服务重启之间必须保持 `MODEL_CONFIG_ENCRYPTION_KEY` 一致，否则已保存的租户密钥无法解密。生产环境应使用密钥管理服务，而不是 Compose 的开发默认值。

@@ -12,12 +12,19 @@ function llmMode(value: string | undefined): 'mock' | 'deepseek' | 'openai' {
   return mode
 }
 
+function instanceId(environmentName: string, prefix: string): string {
+  const explicit = process.env[environmentName]?.trim()
+  if (explicit) return explicit
+  const hostname = process.env['HOSTNAME']?.trim()
+  return hostname ? `${prefix}-${hostname}` : `${prefix}-${process.pid}`
+}
+
 export const config = {
   postgresUrl: process.env['DATABASE_URL'] ?? 'postgres://dsh:dsh@127.0.0.1:5432/dsh',
   redisUrl: process.env['REDIS_URL'] ?? 'redis://127.0.0.1:6379',
   apiPort: integer('API_PORT', 3100),
-  apiInstanceId: process.env['API_INSTANCE_ID'] ?? `api-${process.pid}`,
-  workerId: process.env['WORKER_ID'] ?? `worker-${process.pid}`,
+  apiInstanceId: instanceId('API_INSTANCE_ID', 'api'),
+  workerId: instanceId('WORKER_ID', 'worker'),
   workspacePort: integer('WORKSPACE_PORT', 3200),
   workspaceRoot: process.env['WORKSPACE_ROOT'] ?? '/workspaces',
   workspaceServiceUrl: process.env['WORKSPACE_SERVICE_URL'] ?? 'http://127.0.0.1:3200',
