@@ -90,6 +90,31 @@ assert.equal(configuredModel.response.status, 200, JSON.stringify(configuredMode
 assert.equal(configuredModel.value.apiKeyConfigured, true)
 assert.equal(Object.hasOwn(configuredModel.value, 'apiKey'), false)
 
+const openAiModel = await jsonRequest('/admin/model-config', {
+  method: 'PUT',
+  body: JSON.stringify({
+    mode: 'openai',
+    defaultModel: 'e2e-chat-model',
+    baseUrl: 'https://gateway.example.test/v1/chat/completions',
+    apiKey: `openai-secret-${suffix}`,
+    clearApiKey: false,
+  }),
+})
+assert.equal(openAiModel.response.status, 200, JSON.stringify(openAiModel.value))
+assert.equal(openAiModel.value.provider, 'openai-compatible')
+assert.equal(openAiModel.value.defaultModel, 'e2e-chat-model')
+assert.equal(openAiModel.value.baseUrl, 'https://gateway.example.test/v1')
+assert.equal(openAiModel.value.apiKeyConfigured, true)
+assert.equal(Object.hasOwn(openAiModel.value, 'apiKey'), false)
+
+const restoredMock = await jsonRequest('/admin/model-config', {
+  method: 'PUT',
+  body: JSON.stringify({ mode: 'mock', defaultModel: 'mock-agent', baseUrl: '', apiKey: '', clearApiKey: false }),
+})
+assert.equal(restoredMock.response.status, 200, JSON.stringify(restoredMock.value))
+assert.equal(restoredMock.value.provider, 'distributed-mock')
+assert.equal(restoredMock.value.apiKeyConfigured, false, 'changing provider mode without a new key must not reuse the old key')
+
 const initialWorkspaces = await rpc('workspace.list', {})
 assert.equal(initialWorkspaces.items.length, 1)
 const workspaceId = initialWorkspaces.items[0].workspaceId

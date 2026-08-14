@@ -20,7 +20,7 @@ Redis 只保存加速状态。Streams 调度准入，带过期时间的键承载
 
 浏览器层是独立 Nginx 容器，负责提供静态组装的 `apps/web` shell 和依赖闭合的客户端插件图。一个轻量认证 shell 会拦截原生 Web 启动，提供租户注册、登录、退出与管理员模型配置对话框，然后加载官方会话 UI。Nginx 把普通 RPC 和两条经过认证的 WebSocket 下行流负载均衡到两个 API 副本，并独占 20810 端口。API 副本在 `/v1` 使用的同一套 PostgreSQL 命令与事件之上实现原生浏览器协议，因此 Web 进程不持有会话或 Agent 状态。
 
-模型配置作为租户状态保存在 PostgreSQL。租户管理员可选择 Mock 或 DeepSeek、默认模型、端点，并可选配置租户密钥。API Key 使用部署密钥通过 AES-256-GCM 密封，接口永不返回明文。Worker 为每条命令读取并解密租户快照，构造操作局部的 DeepSeek adapter，绝不修改进程全局 API Key 环境变量，因此并发租户任务不会跨越凭据边界。
+模型配置作为租户状态保存在 PostgreSQL。租户管理员可选择 Mock、DeepSeek 或 OpenAI-compatible Chat Completions、默认模型、端点，并可选配置租户密钥。API Key 使用部署密钥通过 AES-256-GCM 密封，接口永不返回明文。Worker 为每条命令读取并解密租户快照，绝不修改进程全局 API Key 环境变量。DeepSeek 会构造操作局部的直接 adapter；OpenAI-compatible 模式则挂载上游 pi-ai Cordis 插件，并提供只读的操作局部凭据 provider 与手工声明的 `openai-completions` 路由。这既能防止并发租户任务跨越凭据边界，也保留了上游的流式与工具调用转换。
 
 原生输入框和工具运行时共同使用 PostgreSQL 管理的租户 Workspace 记录，以及会话归属与顺序。注册会创建默认 `/workspace` 记录，迁移则把全部已有会话挂到各租户默认工作区。Workspace RPC 与 host-stream 增量实现跨副本原生客户端契约。一个内部 Workspace 服务独占持久卷，并把所选数据库身份映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 副本都不挂载该卷。Worker 在构建命令运行时时获取上游工具目录和指引，注册模型可见代理定义，并通过带认证的内部 HTTP 边界转发调用。Workspace 服务为每个工作区维护长生命周期 Cordis 上下文，并在其中运行原始文件系统、ripgrep 搜索、字符串编辑器、Bash 和后台任务插件，因此后续轮次即使落到另一个 Worker，命令执行和文件仍然共享。
 
@@ -38,6 +38,7 @@ Redis 只保存加速状态。Streams 调度准入，带过期时间的键承载
 - **把 Web UI 嵌入 API 副本一**：拒绝，因为这会让一个 API 成为特殊入口副本，绕过 API 负载均衡，并把前端发布和健康状态与准入容量耦合。
 - **把共享卷直接挂载到每个 Worker**：拒绝，因为模型控制的文件与命令副作用会分散到多个执行容器，Worker 替换还会兼任存储挂载管理，并且边界更难审计。所有工作区 I/O 由一个工具服务负责。
 - **立即为每个租户创建独立 Workspace 容器**：暂缓，因为它能提供更强安全边界，但需要放置、生命周期、配额、清理、路由和镜像编排，超出首个共享工作空间阶段。内部代理接口保留了这条迁移路径。
+- **在分布式应用中再实现一个直接 Chat Completions 客户端**：否决，因为上游 pi-ai 适配器已经负责 OpenAI-compatible 流式输出、工具调用、取消、用量和错误转换。分布式层只需提供租户级配置与凭据。
 
 ## Consequences
 
@@ -45,6 +46,7 @@ Redis 只保存加速状态。Streams 调度准入，带过期时间的键承载
 - 原生 Harness 上下文管理、工具调用、检查点顺序和事件回放保持不变；Redis 和租户信息不会进入模型可见上下文。
 - 仓库原生 Web shell 可以通过任一 API 副本创建会话、选择已配置模型路由、提交和取消提示、恢复历史，并渲染实时模型与工具事件。
 - 浏览器用户可以创建相互隔离的租户并使用数据库会话认证；租户管理员无需重建容器即可修改模型配置。
+- 同一个租户模型入口可以路由到 OpenAI 官方端点、OpenAI-compatible 网关或无需密钥的本地 Chat Completions 服务，而不需要引入第二套 wire 协议实现。
 - 每个租户都有可选择的默认 Workspace，因此官方输入框可以创建绑定工作区的会话并直接开始对话，无需绕过 Web 协议。
 - Agent 会接收上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` schema 与指引，而对应文件和进程工作全部在持有卷的 Workspace 容器中执行。
 - Agent 还会在 Worker 进程中获得上游 `todo_write` 工具和重复调用提醒；它们的会话事件使用与其余对话相同的 PostgreSQL 持久化和跨 API 回放路径。

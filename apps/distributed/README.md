@@ -35,6 +35,8 @@ docker compose -f apps/distributed/docker-compose.yml up -d --build
 node apps/distributed/scripts/e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T workspace node apps/distributed/scripts/workspace-e2e.mjs
 docker compose -f apps/distributed/docker-compose.yml exec -T -e DSH_WEB_URL=http://web api-1 node apps/distributed/scripts/web-e2e.mjs
+docker compose -f apps/distributed/docker-compose.yml --profile test up -d openai-mock
+node apps/distributed/scripts/openai-e2e.mjs
 ```
 
 The repository's native Web UI is available at `http://127.0.0.1:20810`. First use **Create tenant** to create a tenant administrator, then sign in with its tenant slug. Registration creates an isolated **Default** workspace; select it and type in the composer to start a conversation. Existing tenants and sessions are migrated into their own defaults. The independent Nginx container serves the built `apps/web` shell and client-plugin graph, load-balances authenticated HTTP RPCs and WebSocket streams over both APIs, and never runs an Agent. API 1 also listens on `http://127.0.0.1:3101`, and API 2 listens on `http://127.0.0.1:3102`. The Web UI supports workspace-backed session listing and creation, durable history, prompts, cancellation, live events, tool rendering, model selection, logout, and tenant-scoped model administration. The deterministic adapter deliberately makes a native `worker_probe` tool call before answering, while the `[workspace-e2e]` probe calls the remote `bash` tool, so tests cover the real Agent Loop, remote tool dispatch, checkpoint persistence, multi-Worker distribution, tenant isolation, cross-API session resume, and the Web–API compatibility protocol without consuming model credits.
@@ -43,7 +45,9 @@ One internal Workspace service owns the `workspace-data` volume. A PostgreSQL Wo
 
 The distributed adapters are Cordis plugins rather than forks of the upstream tools. The Workspace runtime plugin composes the original filesystem, search, editor, Bash, and Jobs providers under one workspace-scoped lifecycle; the Worker adapter owns the remote catalog listener and proxy registrations. Each command runtime also mounts the upstream `todo_write` tool and repeat-call reminder in the Agent-owning Worker, so todo snapshots remain in the PostgreSQL session log and repeated identical calls receive the standard model-visible guidance. Provider-backed features such as MCP, Skill, Web, LSP, and subagents require tenant configuration or additional distributed ownership and are not mounted by this composition.
 
-Tenant administrators normally configure models from **Model configuration** in the top-right corner. Choose Mock for credit-free testing, or DeepSeek API and enter the default model, base URL, and API key. The key is encrypted with AES-256-GCM in PostgreSQL and is never returned by the API. Each Worker resolves this tenant-scoped snapshot before a command starts, so keys are not placed in process-global environment variables.
+Tenant administrators normally configure models from **Model configuration** in the top-right corner. Choose Mock for credit-free testing, DeepSeek API, or OpenAI-compatible Chat Completions, then enter the default model, base URL, and optional API key. OpenAI-compatible mode accepts either a base such as `https://api.openai.com/v1` or a complete `/chat/completions` URL and normalizes the latter to its base. The key is encrypted with AES-256-GCM in PostgreSQL and is never returned by the API. Each Worker resolves this tenant-scoped snapshot before a command starts, so keys are not placed in process-global environment variables.
+
+OpenAI-compatible mode mounts the upstream `@deepseek-ai/dsh-llm-pi-ai` Cordis plugin under the `openai-compatible` provider route with the `openai-completions` protocol. Its streaming text, native tool calls, usage, finish reasons, cancellation, and error conversion therefore use the upstream adapter rather than a distributed-app protocol fork. The configured model id is passed through to the endpoint; local gateways that do not require authentication may leave the key empty.
 
 The following deployment variables provide initial/fallback defaults:
 
@@ -53,6 +57,8 @@ DEFAULT_PROVIDER=deepseek-official
 DEFAULT_MODEL=deepseek-v4-flash
 DEEPSEEK_API_KEY=replace-me
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+OPENAI_API_KEY=replace-me
+OPENAI_BASE_URL=https://api.openai.com/v1
 MODEL_CONFIG_ENCRYPTION_KEY=replace-with-a-long-random-production-secret
 ```
 
@@ -92,10 +98,10 @@ A Worker updates both its Redis heartbeat and the active command heartbeat. API 
 - Shared persistent files and upstream file/search/edit/Bash/job tools are implemented, but repository clone lifecycle, upload/download, a directory browser, attachments and image reading are not yet exposed in the Web UI.
 - The single Workspace container is one shared trust boundary. RPC path checks prevent ordinary file/search/editor traversal, but arbitrary Bash commands are intentionally powerful and can inspect the container; this topology provides logical tenant routing, not a hard sandbox for mutually untrusted tenants. Use one container or microVM per trust domain when strong tenant isolation is required.
 - Background jobs survive Worker command runtimes but not a Workspace-service restart, and remote job completion does not yet wake an idle Agent automatically; the model can collect known jobs with `job_output` on a later turn.
-- The compatibility layer still omits settings and credential mutation, session rename/fork/attachments, queue editing, goals, and subagent operations. Session search, skills, and presets currently return empty catalogs. Unsupported RPCs return an explicit error.
+- The compatibility layer still omits general settings and credential mutation, session rename/fork/attachments, queue editing, goals, and subagent operations. The administrator model dialog is the supported tenant credential surface. Session search, skills, and presets currently return empty catalogs. Unsupported RPCs return an explicit error.
 - Browser login and tenant isolation are functional, but production operation still requires TLS, cookie `Secure` policy at ingress, CSRF hardening for broader cross-origin deployments, session revocation administration, rate limits, and external identity-provider integration where required.
 - The SSE implementation polls PostgreSQL and is intentionally simple; production fan-out should use committed-event notifications as an acceleration path while retaining sequence-based database catch-up.
 
 ## Model Experience
 
-The distribution layer adds no model-visible tenant, Redis, Worker, or Workspace RPC protocol. The model sees the ordinary Harness system prompt, durable conversation history, upstream tool guidance, and registered tool schemas. The Worker-side definitions are transparent RPC proxies; their successful model-facing content comes from the original tool renderer in the Workspace service. The deterministic test adapter calls `worker_probe` or the explicit Workspace probe; official DeepSeek mode receives the same Harness-level context and tool contract. Distribution metadata stays in command rows and infrastructure keys rather than entering prompts, so routing changes do not invalidate the model prefix by themselves.
+The distribution layer adds no model-visible tenant, Redis, Worker, or Workspace RPC protocol. The model sees the ordinary Harness system prompt, durable conversation history, upstream tool guidance, and registered tool schemas. The Worker-side definitions are transparent RPC proxies; their successful model-facing content comes from the original tool renderer in the Workspace service. The deterministic test adapter calls `worker_probe` or the explicit Workspace probe; official DeepSeek and OpenAI-compatible modes receive the same Harness-level context and tool contract. Distribution metadata stays in command rows and infrastructure keys rather than entering prompts, so routing changes do not invalidate the model prefix by themselves.

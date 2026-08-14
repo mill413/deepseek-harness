@@ -90,11 +90,11 @@ function modelDialogMarkup() {
     <dialog id="model-config-dialog" class="model-dialog">
       <form method="dialog" class="dialog-title"><div><span>租户设置</span><h2>模型配置</h2></div><button value="cancel" aria-label="关闭">×</button></form>
       <form id="model-config-form" class="model-form">
-        <label>运行模式<select name="mode"><option value="mock">Mock（测试）</option><option value="deepseek">DeepSeek API</option></select></label>
+        <label>运行模式<select name="mode"><option value="mock">Mock（测试）</option><option value="deepseek">DeepSeek API</option><option value="openai">OpenAI-compatible Chat Completions</option></select></label>
         <div class="model-provider"><span>Provider 路由</span><strong></strong></div>
         <label>默认模型<input name="defaultModel" required placeholder="deepseek-v4-flash"></label>
-        <div class="deepseek-fields">
-          <label>API Base URL<input name="baseUrl" type="url" placeholder="https://api.deepseek.com"></label>
+        <div class="api-fields">
+          <label>API Base URL<input name="baseUrl" type="url" placeholder="https://api.openai.com/v1"><small class="base-url-help"></small></label>
           <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><small class="key-status"></small></label>
           <label class="check-row"><input name="clearApiKey" type="checkbox">清除租户专用 API Key</label>
         </div>
@@ -121,13 +121,22 @@ function addWorkspaceChrome(session) {
   const form = document.querySelector('#model-config-form')
   const mode = form.elements.mode
   const syncMode = () => {
-    const deepseek = mode.value === 'deepseek'
-    form.querySelector('.deepseek-fields').classList.toggle('hidden', !deepseek)
-    form.querySelector('.model-provider strong').textContent = deepseek ? 'deepseek-official' : 'distributed-mock'
+    const apiMode = mode.value !== 'mock'
+    form.querySelector('.api-fields').classList.toggle('hidden', !apiMode)
+    form.querySelector('.model-provider strong').textContent = mode.value === 'deepseek'
+      ? 'deepseek-official'
+      : mode.value === 'openai'
+        ? 'openai-compatible'
+        : 'distributed-mock'
+    form.querySelector('.base-url-help').textContent = mode.value === 'openai'
+      ? '填写 API 根地址（通常以 /v1 结尾）；也可粘贴完整 /chat/completions 地址。'
+      : ''
   }
   mode.addEventListener('change', () => {
     if (mode.value === 'deepseek' && form.elements.defaultModel.value === 'mock-agent') form.elements.defaultModel.value = 'deepseek-v4-flash'
-    if (mode.value === 'mock' && form.elements.defaultModel.value.startsWith('deepseek-')) form.elements.defaultModel.value = 'mock-agent'
+    if (mode.value === 'openai' && (form.elements.defaultModel.value === 'mock-agent' || form.elements.defaultModel.value.startsWith('deepseek-'))) form.elements.defaultModel.value = ''
+    if (mode.value === 'mock' && form.elements.defaultModel.value !== 'mock-agent') form.elements.defaultModel.value = 'mock-agent'
+    form.elements.baseUrl.value = mode.value === 'deepseek' ? 'https://api.deepseek.com' : mode.value === 'openai' ? 'https://api.openai.com/v1' : ''
     syncMode()
   })
   nav.querySelector('[data-model]').addEventListener('click', async () => {
@@ -137,7 +146,7 @@ function addWorkspaceChrome(session) {
       const value = await request('/admin/model-config')
       mode.value = value.mode
       form.elements.defaultModel.value = value.defaultModel
-      form.elements.baseUrl.value = value.baseUrl ?? 'https://api.deepseek.com'
+      form.elements.baseUrl.value = value.baseUrl ?? (value.mode === 'openai' ? 'https://api.openai.com/v1' : 'https://api.deepseek.com')
       form.elements.apiKey.value = ''
       form.elements.clearApiKey.checked = false
       form.querySelector('.key-status').textContent = value.apiKeyConfigured ? '当前已有可用密钥；留空将继续使用' : '尚未配置密钥'

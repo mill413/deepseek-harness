@@ -1,9 +1,12 @@
 import { config } from './config.ts'
 import { one, pool } from './db.ts'
 import { decryptSecret, encryptSecret } from './secrets.ts'
+import { OPENAI_COMPATIBLE_PROVIDER } from './openai-compatible.ts'
+
+export type ModelMode = 'mock' | 'deepseek' | 'openai'
 
 export interface TenantModelConfig {
-  mode: 'mock' | 'deepseek'
+  mode: ModelMode
   provider: string
   defaultModel: string
   baseUrl: string | null
@@ -12,7 +15,7 @@ export interface TenantModelConfig {
 }
 
 interface ModelConfigRow {
-  mode: 'mock' | 'deepseek'
+  mode: ModelMode
   provider: string
   default_model: string
   base_url: string | null
@@ -21,13 +24,26 @@ interface ModelConfigRow {
 
 function defaults(): TenantModelConfig {
   const mode = config.llmMode
+  const apiKey = mode === 'deepseek'
+    ? config.deepSeekApiKey
+    : mode === 'openai'
+      ? config.openAiApiKey
+      : ''
   return {
     mode,
-    provider: mode === 'deepseek' ? 'deepseek-official' : 'distributed-mock',
+    provider: mode === 'deepseek'
+      ? 'deepseek-official'
+      : mode === 'openai'
+        ? OPENAI_COMPATIBLE_PROVIDER
+        : 'distributed-mock',
     defaultModel: config.defaultModel,
-    baseUrl: mode === 'deepseek' ? config.deepSeekBaseUrl : null,
-    apiKey: config.deepSeekApiKey || null,
-    apiKeyConfigured: config.deepSeekApiKey !== '',
+    baseUrl: mode === 'deepseek'
+      ? config.deepSeekBaseUrl
+      : mode === 'openai'
+        ? config.openAiBaseUrl
+        : null,
+    apiKey: apiKey || null,
+    apiKeyConfigured: apiKey !== '',
   }
 }
 
@@ -38,7 +54,11 @@ export async function tenantModelConfig(tenantId: string): Promise<TenantModelCo
   )
   if (row === undefined) return defaults()
   const storedKey = row.api_key_encrypted === null ? null : decryptSecret(row.api_key_encrypted)
-  const fallbackKey = config.deepSeekApiKey || null
+  const fallbackKey = row.mode === 'deepseek'
+    ? config.deepSeekApiKey || null
+    : row.mode === 'openai'
+      ? config.openAiApiKey || null
+      : null
   return {
     mode: row.mode,
     provider: row.provider,
@@ -50,7 +70,7 @@ export async function tenantModelConfig(tenantId: string): Promise<TenantModelCo
 }
 
 export interface ModelConfigUpdate {
-  mode: 'mock' | 'deepseek'
+  mode: ModelMode
   defaultModel: string
   baseUrl: string | null
   apiKey?: string
@@ -58,16 +78,20 @@ export interface ModelConfigUpdate {
 }
 
 export async function saveTenantModelConfig(tenantId: string, userId: string, update: ModelConfigUpdate): Promise<TenantModelConfig> {
-  const existing = await one<{ api_key_encrypted: string | null }>(
-    'SELECT api_key_encrypted FROM tenant_model_configs WHERE tenant_id = $1',
+  const existing = await one<{ mode: ModelMode; api_key_encrypted: string | null }>(
+    'SELECT mode, api_key_encrypted FROM tenant_model_configs WHERE tenant_id = $1',
     [tenantId],
   )
   const apiKeyEncrypted = update.clearApiKey
     ? null
     : update.apiKey === undefined
-      ? existing?.api_key_encrypted ?? null
+      ? existing?.mode === update.mode ? existing.api_key_encrypted : null
       : encryptSecret(update.apiKey)
-  const provider = update.mode === 'deepseek' ? 'deepseek-official' : 'distributed-mock'
+  const provider = update.mode === 'deepseek'
+    ? 'deepseek-official'
+    : update.mode === 'openai'
+      ? OPENAI_COMPATIBLE_PROVIDER
+      : 'distributed-mock'
   await pool.query(`
     INSERT INTO tenant_model_configs
       (tenant_id, mode, provider, default_model, base_url, api_key_encrypted, updated_by)

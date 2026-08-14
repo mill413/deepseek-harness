@@ -4,9 +4,11 @@ function integer(name: string, fallback: number): number {
   return value
 }
 
-function llmMode(value: string | undefined): 'mock' | 'deepseek' {
+function llmMode(value: string | undefined): 'mock' | 'deepseek' | 'openai' {
   const mode = value ?? 'mock'
-  if (mode !== 'mock' && mode !== 'deepseek') throw new Error('DISTRIBUTED_LLM_MODE must be mock or deepseek')
+  if (mode !== 'mock' && mode !== 'deepseek' && mode !== 'openai') {
+    throw new Error('DISTRIBUTED_LLM_MODE must be mock, deepseek, or openai')
+  }
   return mode
 }
 
@@ -31,6 +33,8 @@ export const config = {
   defaultModel: process.env['DEFAULT_MODEL'] ?? 'mock-agent',
   deepSeekApiKey: process.env['DEEPSEEK_API_KEY'] ?? '',
   deepSeekBaseUrl: process.env['DEEPSEEK_BASE_URL'] ?? 'https://api.deepseek.com',
+  openAiApiKey: process.env['OPENAI_API_KEY'] ?? '',
+  openAiBaseUrl: process.env['OPENAI_BASE_URL'] ?? 'https://api.openai.com/v1',
   authCookieName: process.env['AUTH_COOKIE_NAME'] ?? 'dsh_session',
   authSessionTtlSeconds: integer('AUTH_SESSION_TTL_SECONDS', 60 * 60 * 24 * 7),
   modelConfigEncryptionKey: process.env['MODEL_CONFIG_ENCRYPTION_KEY'] ?? 'replace-this-development-encryption-key',

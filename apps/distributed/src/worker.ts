@@ -21,6 +21,7 @@ import { config } from './config.ts'
 import { migrate, one, pool, tx } from './db.ts'
 import { internalSessionId } from './identity.ts'
 import { tenantModelConfig, type TenantModelConfig } from './model-config.ts'
+import * as OpenAiCompatible from './openai-compatible.ts'
 import PostgresSessionPersistence from './postgres-persistence.ts'
 import { connectRedis, ensureGroup, type RedisClient } from './redis.ts'
 import * as WorkerExtensions from './worker-extensions.ts'
@@ -182,6 +183,14 @@ async function buildHarness(modelConfig: TenantModelConfig, tenantId: string, wo
       },
       resolveUserId: () => getOrCreateAnonymousUserId(),
     }))
+  }
+  if (modelConfig.mode === 'openai') {
+    if (modelConfig.baseUrl === null) throw new Error('OpenAI-compatible mode requires a base URL')
+    await ctx.plugin(OpenAiCompatible, {
+      baseUrl: modelConfig.baseUrl,
+      model: modelConfig.defaultModel,
+      apiKey: modelConfig.apiKey,
+    })
   }
   ctx.tools.register(defineTool({
     name: 'worker_probe',

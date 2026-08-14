@@ -17,6 +17,8 @@ x-runtime: &runtime
     DEFAULT_MODEL: ${DEFAULT_MODEL:-mock-agent}
     DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
     DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+    OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
     AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-604800}
     MODEL_CONFIG_ENCRYPTION_KEY: ${MODEL_CONFIG_ENCRYPTION_KEY:-distributed-local-development-key-change-me}
     WORKSPACE_SERVICE_URL: http://workspace:3200
@@ -32,6 +34,18 @@ x-runtime: &runtime
   restart: unless-stopped
 
 services:
+  openai-mock:
+    profiles: ["test"]
+    image: dsh-distributed-api-1
+    command: ["node", "apps/distributed/scripts/openai-mock-server.mjs"]
+    environment:
+      MOCK_OPENAI_PORT: "3300"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3300/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   postgres:
     image: postgres:17-alpine
     environment:

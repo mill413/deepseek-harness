@@ -16,7 +16,7 @@ import {
 import { config } from './config.ts'
 import { migrate, one, pool, tx } from './db.ts'
 import { assertUuid, HttpError } from './identity.ts'
-import { publicModelConfig, saveTenantModelConfig, tenantModelConfig } from './model-config.ts'
+import { publicModelConfig, saveTenantModelConfig, tenantModelConfig, type ModelMode } from './model-config.ts'
 import { connectRedis, type RedisClient } from './redis.ts'
 
 interface WebSocketConnection {
@@ -174,10 +174,16 @@ function rpcRequest(input: Record<string, unknown>, pathMethod: string): RpcRequ
   return input as unknown as RpcRequestEnvelope
 }
 
+function providerDisplayName(provider: string): string {
+  if (provider === 'deepseek-official') return 'DeepSeek'
+  if (provider === 'openai-compatible') return 'OpenAI-compatible Chat Completions'
+  return provider
+}
+
 function modelGroup(provider: string, model: string): Record<string, unknown> {
   return {
     id: provider,
-    name: provider === 'deepseek-official' ? 'DeepSeek' : provider,
+    name: providerDisplayName(provider),
     models: [{ id: model, name: model }],
   }
 }
@@ -522,7 +528,7 @@ async function handleRpc(
         return rpcSuccess(request.rpcId, {
           providers: [{
             provider: modelConfig.provider,
-            displayName: modelConfig.provider === 'deepseek-official' ? 'DeepSeek' : modelConfig.provider,
+            displayName: providerDisplayName(modelConfig.provider),
             settingsNs: '',
             settingsPath: [],
             active: true,
@@ -596,17 +602,19 @@ function authLogin(input: Record<string, unknown>): { tenantSlug: string; userna
 }
 
 function modelConfigUpdate(input: Record<string, unknown>): {
-  mode: 'mock' | 'deepseek'
+  mode: ModelMode
   defaultModel: string
   baseUrl: string | null
   apiKey?: string
   clearApiKey: boolean
 } {
   const mode = input['mode']
-  if (mode !== 'mock' && mode !== 'deepseek') throw new HttpError(400, 'mode must be mock or deepseek')
+  if (mode !== 'mock' && mode !== 'deepseek' && mode !== 'openai') {
+    throw new HttpError(400, 'mode must be mock, deepseek, or openai')
+  }
   const defaultModel = requiredText(input, 'defaultModel', 1, 128)
   let baseUrl: string | null = null
-  if (mode === 'deepseek') {
+  if (mode !== 'mock') {
     const raw = requiredText(input, 'baseUrl', 8, 2048)
     let parsed: URL
     try {
@@ -615,6 +623,7 @@ function modelConfigUpdate(input: Record<string, unknown>): {
       throw new HttpError(400, 'baseUrl must be a valid URL')
     }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') throw new HttpError(400, 'baseUrl must use http or https')
+    parsed.pathname = parsed.pathname.replace(/\/chat\/completions\/?$/u, '') || '/'
     baseUrl = parsed.toString().replace(/\/$/u, '')
   }
   const apiKeyValue = input['apiKey']
