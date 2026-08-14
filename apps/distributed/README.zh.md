@@ -7,14 +7,10 @@
 ```mermaid
 flowchart LR
   B[Browser] --> W[Web / Nginx]
-  C[REST client] --> A1[API 1]
-  C --> A2[API 2]
-  W --> A1
-  W --> A2
-  A1 --> P[(PostgreSQL)]
-  A2 --> P
-  A1 --> R[(Redis)]
-  A2 --> R
+  C[REST client] --> A[API]
+  W --> A
+  A --> P[(PostgreSQL)]
+  A --> R[(Redis)]
   R --> W1[Worker 1]
   R --> W2[Worker 2]
   W1 --> P
@@ -24,11 +20,11 @@ flowchart LR
   S --> V[(Persistent workspace volume)]
 ```
 
-浏览器用户使用租户标识、用户名和密码注册或登录。API 保存 scrypt 密码哈希与不透明浏览器会话哈希，并返回 HttpOnly、SameSite Cookie；该 Cookie 可通过任一 API 副本同时认证 HTTP 和 WebSocket 流量。Nginx 会清除调用方伪造的身份请求头。每条会话、命令和事件查询都包含已认证租户键，面向用户的会话操作还包含所有者键。直连端口仍保留 `x-tenant-id` 和 `x-user-id` 作为测试/服务身份适配器，不应暴露给不可信网络。
+浏览器用户使用租户标识、用户名和密码注册或登录。API 保存 scrypt 密码哈希与不透明浏览器会话哈希，并返回用于认证 HTTP 和 WebSocket 流量的 HttpOnly、SameSite Cookie。Nginx 会清除调用方伪造的身份请求头。每条会话、命令和事件查询都包含已认证租户键，面向用户的会话操作还包含所有者键。API 直连端口仍保留 `x-tenant-id` 和 `x-user-id` 作为测试/服务身份适配器，不应暴露给不可信网络。
 
 ## 运行与测试
 
-在仓库根目录启动固定的双 API、双 Worker 拓扑，并运行跨实例测试：
+在仓库根目录启动固定的单 API、双 Worker 拓扑，并运行分布式调度测试：
 
 ```sh
 docker compose -f apps/distributed/docker-compose.yml up -d --build
@@ -39,13 +35,13 @@ docker compose -f apps/distributed/docker-compose.yml --profile test up -d opena
 node apps/distributed/scripts/openai-e2e.mjs
 ```
 
-仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，并把经过认证的 HTTP RPC 与 WebSocket 流量负载均衡到两个 API；Web 容器本身不运行 agent。API 1 还监听 `http://127.0.0.1:3101`，API 2 监听 `http://127.0.0.1:3102`。可工作的分布式适配器覆盖工作区与会话管理、持久历史、提示词与取消、实时事件、工具、设置、加密凭据、模型选择、agent 预设、权限与计划模式、目标、消息反馈、skill 和上下文压缩。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 agent loop、远程工具派发、检查点持久化、多 Worker 分配、租户隔离、跨 API 会话恢复和 Web–API 兼容协议。
+仓库原生 Web UI 位于 `http://127.0.0.1:20810`。首次使用时点击“创建租户”创建租户管理员，然后用租户标识登录。注册会创建一个隔离的“Default”工作区；选择它后即可在输入框开始对话。已有租户和会话也会迁移到各自的默认工作区。独立 Nginx 容器负责提供构建后的 `apps/web` shell 与完整上游 Web 客户端组合，并把经过认证的 HTTP RPC 与 WebSocket 流量转发到 API；Web 容器本身不运行 agent。API 还监听 `http://127.0.0.1:3101`。可工作的分布式适配器覆盖工作区与会话管理、持久历史、提示词与取消、实时事件、工具、设置、加密凭据、模型选择、agent 预设、权限与计划模式、目标、消息反馈、skill 和上下文压缩。默认确定性适配器会在回答前刻意发起一次原生 `worker_probe` 工具调用，而 `[workspace-e2e]` 探针会调用远程 `bash` 工具，因此测试无需消耗模型额度，也能覆盖真实 agent loop、远程工具派发、检查点持久化、多 Worker 分配、租户隔离、会话恢复和 Web–API 兼容协议。
 
 一个内部 Workspace 服务独占 `workspace-data` 卷。PostgreSQL Workspace id 会确定性映射为 `/workspaces/<tenant-id>/<workspace-id>`；API 和 Worker 容器都不挂载该卷。Worker 会为上游 `read`、`write`、`edit`、`glob`、`grep`、`str_replace_editor`、`bash`、`job_output`、`job_list` 和 `job_kill` 定义注册 RPC 代理，而原始上游实现在 Workspace 容器内执行。因此前台与后台 shell 进程、ripgrep 搜索和文件修改可在两个 Worker 之间共享同一个持久目录，并能跨 Workspace 服务重启保留。必须让 Worker 与 Workspace 服务使用相同的 `WORKSPACE_SERVICE_TOKEN`，且不要对外发布 3200 端口。
 
 分布式适配器是 Cordis 插件，而不是上游工具的 fork。Workspace 运行时插件在一个工作区作用域生命周期内组合原始文件系统、搜索、编辑器、Bash 和后台任务提供方；Worker 适配器拥有远程目录监听器和代理注册。每个非 minimal 命令运行时都会挂载上游 token 计量、基础压缩、工具结果裁剪、计划模式、`todo_write` 工具和重复调用提醒。工作区内的 `.dsh/skills` 与 `.agents/skills` 文件会进入目录，并可通过面向模型的 `skill` 工具加载。Web 组装器从上游 `base` 与 `web-app` Cordis 组合推导完整客户端清单，不维护分布式白名单。[架构决策](../../.agents/notes/implemented/architecture/2026-08-14-distributed-upstream-composition.md) 区分了这种客户端组合一致性和仍需分布式所有者的高级能力。
 
-租户管理员通常通过“设置 → 模型”或分布式“模型配置”快捷入口完成设置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API 或 OpenAI-compatible Chat Completions，然后填写默认模型、Base URL 和可选的 API Key。OpenAI-compatible 模式既接受 `https://api.openai.com/v1` 这样的根地址，也接受完整的 `/chat/completions` 地址；后者会被规范化为根地址。通用 UI 设置、模型设置、凭据引用与 agent 预设默认值均按租户隔离，修订号通过比较并设置方式写入。凭据值使用 AES-256-GCM 加密后存入 PostgreSQL，接口永不回显。每个 Worker 会在命令开始前解析对应租户的配置快照，因此不会通过进程全局环境变量串用密钥。
+租户管理员通过“设置 → 模型”完成模型配置。可以选择 Mock 做无额度测试，也可以选择 DeepSeek API 或 OpenAI-compatible Chat Completions，然后填写默认模型、Base URL 和可选的 API Key。早期的分布式快捷入口已经移除，上游设置页是唯一的 UI 所有者；`GET` 与 `PUT /admin/model-config` 仍为自动化和向后兼容保留。OpenAI-compatible 模式既接受 `https://api.openai.com/v1` 这样的根地址，也接受完整的 `/chat/completions` 地址；后者会被规范化为根地址。通用 UI 设置、模型设置、凭据引用与 agent 预设默认值均按租户隔离，修订号通过比较并设置方式写入。凭据值使用 AES-256-GCM 加密后存入 PostgreSQL，接口永不回显。每个 Worker 会在命令开始前解析对应租户的配置快照，因此不会通过进程全局环境变量串用密钥。
 
 OpenAI-compatible 模式会把上游 `@deepseek-ai/dsh-llm-pi-ai` Cordis 插件挂载到 `openai-compatible` provider 路由，并固定使用 `openai-completions` 协议。因此流式文本、原生工具调用、用量、结束原因、取消和错误转换均复用上游适配器，而不是在分布式应用中 fork 一份协议实现。配置的模型 id 会原样传给端点；不要求认证的本地网关可以将密钥留空。
 
@@ -66,7 +62,7 @@ MODEL_CONFIG_ENCRYPTION_KEY=replace-with-a-long-random-production-secret
 docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build
 ```
 
-新会话使用所属租户的默认值；已有会话继续保留数据库中存储的提供方和模型，直到重新选择。所有 API 与 Worker 副本以及服务重启之间必须保持 `MODEL_CONFIG_ENCRYPTION_KEY` 一致，否则已保存的租户密钥无法解密。生产环境应使用密钥管理服务，而不是 Compose 的开发默认值。
+新会话使用所属租户的默认值；已有会话继续保留数据库中存储的提供方和模型，直到重新选择。API、所有 Worker 以及服务重启之间必须保持 `MODEL_CONFIG_ENCRYPTION_KEY` 一致，否则已保存的租户密钥无法解密。生产环境应使用密钥管理服务，而不是 Compose 的开发默认值。
 
 ## API 范围
 
@@ -87,7 +83,7 @@ docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compo
 
 ## 投递与恢复契约
 
-API 副本使用 `FOR UPDATE SKIP LOCKED` 把排队中的 PostgreSQL 命令行泵入一个 Redis 消费组 Stream。投递是至少一次：在 `XADD` 之后、SQL 更新之前崩溃可能产生重复 Stream 项，而原子命令认领会阻止重复执行。Worker 必须先持有 `tenant/session` 的 Redis 租约才能认领工作，因此集群中同一会话最多只有一个活跃轮次。Harness 语义检查点会在模型调用和顶层工具副作用之前持久刷写请求前缀。
+API 使用 `FOR UPDATE SKIP LOCKED` 把排队中的 PostgreSQL 命令行泵入一个 Redis 消费组 Stream。投递是至少一次：在 `XADD` 之后、SQL 更新之前崩溃可能产生重复 Stream 项，而原子命令认领会阻止重复执行。Worker 必须先持有 `tenant/session` 的 Redis 租约才能认领工作，因此集群中同一会话最多只有一个活跃轮次。Harness 语义检查点会在模型调用和顶层工具副作用之前持久刷写请求前缀。
 
 Worker 同时更新 Redis Worker 心跳和活跃命令心跳。API 泵会在两个租约窗口后把陈旧运行命令放回 outbox。Worker 启动和请求处理共用受 advisory lock 保护的幂等迁移。事件始终从 PostgreSQL 提供，因此 Redis 通知丢失不会导致 transcript 丢失。
 

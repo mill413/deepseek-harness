@@ -58,6 +58,12 @@ const index = await indexResponse.text()
 assert.match(index, /window\.__DSH_BOOT__/u)
 assert.match(index, /distributed-auth\.js/u)
 assert.match(index, /@deepseek-ai\/dsh-client-ui-conversation/u)
+assert.match(index, /@deepseek-ai\/dsh-client-ui-settings/u)
+const shellResponse = await fetch(`${baseUrl}/distributed-auth.js`)
+assert.equal(shellResponse.status, 200)
+const shell = await shellResponse.text()
+assert.doesNotMatch(shell, /data-model|model-config-dialog/u, 'model configuration must use the upstream Settings view')
+assert.match(shell, /1× API/u)
 
 const unauthenticated = await jsonRequest('/api/session.list', {
   method: 'POST',

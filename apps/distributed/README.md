@@ -7,14 +7,10 @@ This app turns the in-process Harness into a small multi-tenant API–Redis–Wo
 ```mermaid
 flowchart LR
   B[Browser] --> W[Web / Nginx]
-  C[REST client] --> A1[API 1]
-  C --> A2[API 2]
-  W --> A1
-  W --> A2
-  A1 --> P[(PostgreSQL)]
-  A2 --> P
-  A1 --> R[(Redis)]
-  A2 --> R
+  C[REST client] --> A[API]
+  W --> A
+  A --> P[(PostgreSQL)]
+  A --> R[(Redis)]
   R --> W1[Worker 1]
   R --> W2[Worker 2]
   W1 --> P
@@ -24,11 +20,11 @@ flowchart LR
   S --> V[(Persistent workspace volume)]
 ```
 
-Browser users register or log in with a tenant slug, username, and password. The API stores scrypt password hashes and opaque browser-session hashes, then returns an HttpOnly, SameSite cookie that authenticates both HTTP and WebSocket traffic through either API replica. Nginx removes caller-supplied identity headers. Every session, command, and event query includes the authenticated tenant key, and user-facing session operations also include the owner key. Direct ports retain `x-tenant-id` and `x-user-id` as a test/service identity adapter; do not expose those ports to untrusted networks.
+Browser users register or log in with a tenant slug, username, and password. The API stores scrypt password hashes and opaque browser-session hashes, then returns an HttpOnly, SameSite cookie that authenticates both HTTP and WebSocket traffic. Nginx removes caller-supplied identity headers. Every session, command, and event query includes the authenticated tenant key, and user-facing session operations also include the owner key. The direct API port retains `x-tenant-id` and `x-user-id` as a test/service identity adapter; do not expose it to untrusted networks.
 
 ## Run and test
 
-From the repository root, start the fixed two-API/two-Worker topology and run the cross-instance test:
+From the repository root, start the fixed one-API/two-Worker topology and run the distributed scheduling test:
 
 ```sh
 docker compose -f apps/distributed/docker-compose.yml up -d --build
@@ -39,13 +35,13 @@ docker compose -f apps/distributed/docker-compose.yml --profile test up -d opena
 node apps/distributed/scripts/openai-e2e.mjs
 ```
 
-The repository's native Web UI is available at `http://127.0.0.1:20810`. First use **Create tenant** to create a tenant administrator, then sign in with its tenant slug. Registration creates an isolated **Default** workspace; select it and type in the composer to start a conversation. Existing tenants and sessions are migrated into their own defaults. The independent Nginx container serves the built `apps/web` shell and the complete upstream Web client composition, load-balances authenticated HTTP RPCs and WebSocket streams over both APIs, and never runs an Agent. API 1 also listens on `http://127.0.0.1:3101`, and API 2 listens on `http://127.0.0.1:3102`. The working distributed adapters cover workspace and session management, durable history, prompts and cancellation, live events, tools, settings, encrypted credentials, model selection, agent presets, permission and plan modes, goals, message feedback, skills, and context compaction. The deterministic adapter deliberately makes a native `worker_probe` tool call before answering, while the `[workspace-e2e]` probe calls the remote `bash` tool, so tests cover the real Agent Loop, remote tool dispatch, checkpoint persistence, multi-Worker distribution, tenant isolation, cross-API session resume, and the Web–API compatibility protocol without consuming model credits.
+The repository's native Web UI is available at `http://127.0.0.1:20810`. First use **Create tenant** to create a tenant administrator, then sign in with its tenant slug. Registration creates an isolated **Default** workspace; select it and type in the composer to start a conversation. Existing tenants and sessions are migrated into their own defaults. The independent Nginx container serves the built `apps/web` shell and the complete upstream Web client composition, forwards authenticated HTTP RPCs and WebSocket streams to the API, and never runs an Agent. The API also listens on `http://127.0.0.1:3101`. The working distributed adapters cover workspace and session management, durable history, prompts and cancellation, live events, tools, settings, encrypted credentials, model selection, agent presets, permission and plan modes, goals, message feedback, skills, and context compaction. The deterministic adapter deliberately makes a native `worker_probe` tool call before answering, while the `[workspace-e2e]` probe calls the remote `bash` tool, so tests cover the real Agent Loop, remote tool dispatch, checkpoint persistence, multi-Worker distribution, tenant isolation, session resume, and the Web–API compatibility protocol without consuming model credits.
 
 One internal Workspace service owns the `workspace-data` volume. A PostgreSQL Workspace id maps deterministically to `/workspaces/<tenant-id>/<workspace-id>`; API and Worker containers do not mount that volume. Workers register RPC proxies for the upstream `read`, `write`, `edit`, `glob`, `grep`, `str_replace_editor`, `bash`, `job_output`, `job_list`, and `job_kill` definitions, and the original upstream implementations execute inside the Workspace container. Foreground and background shell processes, ripgrep searches, and file mutations therefore share the same persistent directory across both Workers and across Workspace-service restarts. Keep `WORKSPACE_SERVICE_TOKEN` equal on Workers and the Workspace service and do not publish port 3200.
 
 The distributed adapters are Cordis plugins rather than forks of the upstream tools. The Workspace runtime plugin composes the original filesystem, search, editor, Bash, and Jobs providers under one workspace-scoped lifecycle; the Worker adapter owns the remote catalog listener and proxy registrations. Each non-minimal command runtime mounts the upstream token meter, basic compaction, tool-result pruner, plan mode, `todo_write` tool, and repeat-call reminder. Workspace-local `.dsh/skills` and `.agents/skills` files are cataloged and can be loaded through the model-facing `skill` tool. The Web assembler derives its complete client roster from the upstream `base` and `web-app` Cordis compositions instead of maintaining a distributed whitelist. The [architecture decision](../../.agents/notes/implemented/architecture/2026-08-14-distributed-upstream-composition.md) distinguishes this client-composition parity from advanced capabilities that still need a distributed owner.
 
-Tenant administrators normally configure models from **Settings → Models** or the distributed **Model configuration** shortcut. Choose Mock for credit-free testing, DeepSeek API, or OpenAI-compatible Chat Completions, then enter the default model, base URL, and optional API key. OpenAI-compatible mode accepts either a base such as `https://api.openai.com/v1` or a complete `/chat/completions` URL and normalizes the latter to its base. General UI settings, model settings, credential references, and agent-preset defaults are tenant scoped; revisions use compare-and-set writes. Credential values are encrypted with AES-256-GCM in PostgreSQL and are never returned by the API. Each Worker resolves this tenant-scoped snapshot before a command starts, so keys are not placed in process-global environment variables.
+Tenant administrators configure models from **Settings → Models**. Choose Mock for credit-free testing, DeepSeek API, or OpenAI-compatible Chat Completions, then enter the default model, base URL, and optional API key. The earlier distributed shortcut was removed so the upstream settings view is the single UI owner; `GET` and `PUT /admin/model-config` remain available for automation and backward compatibility. OpenAI-compatible mode accepts either a base such as `https://api.openai.com/v1` or a complete `/chat/completions` URL and normalizes the latter to its base. General UI settings, model settings, credential references, and agent-preset defaults are tenant scoped; revisions use compare-and-set writes. Credential values are encrypted with AES-256-GCM in PostgreSQL and are never returned by the API. Each Worker resolves this tenant-scoped snapshot before a command starts, so keys are not placed in process-global environment variables.
 
 OpenAI-compatible mode mounts the upstream `@deepseek-ai/dsh-llm-pi-ai` Cordis plugin under the `openai-compatible` provider route with the `openai-completions` protocol. Its streaming text, native tool calls, usage, finish reasons, cancellation, and error conversion therefore use the upstream adapter rather than a distributed-app protocol fork. The configured model id is passed through to the endpoint; local gateways that do not require authentication may leave the key empty.
 
@@ -66,7 +62,7 @@ MODEL_CONFIG_ENCRYPTION_KEY=replace-with-a-long-random-production-secret
 docker compose --env-file apps/distributed/.env -f apps/distributed/docker-compose.yml up -d --build
 ```
 
-New sessions receive the tenant's configured default; existing sessions retain their stored provider and model until selected again. Keep `MODEL_CONFIG_ENCRYPTION_KEY` stable across every API and Worker replica and across restarts, or stored tenant keys cannot be decrypted. Use a secret manager in production rather than the Compose development default.
+New sessions receive the tenant's configured default; existing sessions retain their stored provider and model until selected again. Keep `MODEL_CONFIG_ENCRYPTION_KEY` stable across the API and all Workers and across restarts, or stored tenant keys cannot be decrypted. Use a secret manager in production rather than the Compose development default.
 
 ## API surface
 
@@ -87,7 +83,7 @@ New sessions receive the tenant's configured default; existing sessions retain t
 
 ## Delivery and recovery contract
 
-API replicas pump queued PostgreSQL command rows to one Redis consumer-group stream with `FOR UPDATE SKIP LOCKED`. Delivery is at least once: a crash after `XADD` and before the SQL update may duplicate a stream entry, while the atomic command claim prevents duplicate execution. A Worker must hold the Redis lease for `tenant/session` before claiming work, so one session has only one active turn across the cluster. Harness semantic checkpoints durably flush the request prefix before model calls and top-level tool side effects.
+The API pumps queued PostgreSQL command rows to one Redis consumer-group stream with `FOR UPDATE SKIP LOCKED`. Delivery is at least once: a crash after `XADD` and before the SQL update may duplicate a stream entry, while the atomic command claim prevents duplicate execution. A Worker must hold the Redis lease for `tenant/session` before claiming work, so one session has only one active turn across the cluster. Harness semantic checkpoints durably flush the request prefix before model calls and top-level tool side effects.
 
 A Worker updates both its Redis heartbeat and the active command heartbeat. API pumps return stale running commands to the outbox after two lease windows. Worker startup and request handling use one advisory-locked idempotent migration. Events are served from PostgreSQL, so lost Redis notifications do not lose transcript data.
 

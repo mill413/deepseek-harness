@@ -4,7 +4,6 @@ upstream distributed_api {
   zone distributed_api 64k;
   least_conn;
   server api-1:3100 resolve;
-  server api-2:3100 resolve;
 }
 
 server {

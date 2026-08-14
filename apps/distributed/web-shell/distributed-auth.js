@@ -18,7 +18,7 @@ function authMarkup() {
         <h1>你的团队 Agent 工作台</h1>
         <p>租户数据隔离、分布式任务执行，以及集中管理的模型连接配置。</p>
         <div class="auth-points">
-          <div><b>2× API</b><span>无状态接入与故障切换</span></div>
+          <div><b>1× API</b><span>统一认证与请求接入</span></div>
           <div><b>2× Worker</b><span>Redis 队列分布式执行</span></div>
           <div><b>PostgreSQL</b><span>租户会话与历史持久化</span></div>
         </div>
@@ -85,106 +85,15 @@ function showAuth() {
   }
 }
 
-function modelDialogMarkup() {
-  return `
-    <dialog id="model-config-dialog" class="model-dialog">
-      <form method="dialog" class="dialog-title"><div><span>租户设置</span><h2>模型配置</h2></div><button value="cancel" aria-label="关闭">×</button></form>
-      <form id="model-config-form" class="model-form">
-        <label>运行模式<select name="mode"><option value="mock">Mock（测试）</option><option value="deepseek">DeepSeek API</option><option value="openai">OpenAI-compatible Chat Completions</option></select></label>
-        <div class="model-provider"><span>Provider 路由</span><strong></strong></div>
-        <label>默认模型<input name="defaultModel" required placeholder="deepseek-v4-flash"></label>
-        <div class="api-fields">
-          <label>API Base URL<input name="baseUrl" type="url" placeholder="https://api.openai.com/v1"><small class="base-url-help"></small></label>
-          <label>API Key<input name="apiKey" type="password" autocomplete="new-password" placeholder="留空则保留当前密钥"><small class="key-status"></small></label>
-          <label class="check-row"><input name="clearApiKey" type="checkbox">清除租户专用 API Key</label>
-        </div>
-        <p class="model-help">配置对该租户新建的会话和后续 Worker 任务生效。密钥加密存储，保存后不可回显。</p>
-        <p class="form-error" aria-live="polite"></p>
-        <div class="dialog-actions"><button type="button" data-close>取消</button><button class="primary" type="submit">保存配置</button></div>
-      </form>
-    </dialog>`
-}
-
 function addWorkspaceChrome(session) {
   const nav = document.createElement('aside')
   nav.className = 'tenant-nav'
   nav.innerHTML = `
     <div class="tenant-copy"><strong></strong><span></span></div>
-    <button data-model type="button">模型配置</button>
     <button data-logout type="button">退出</button>`
   nav.querySelector('strong').textContent = session.tenant.name
   nav.querySelector('span').textContent = `${session.tenant.slug} · ${session.user.username}`
   document.body.append(nav)
-  document.body.insertAdjacentHTML('beforeend', modelDialogMarkup())
-
-  const dialog = document.querySelector('#model-config-dialog')
-  const form = document.querySelector('#model-config-form')
-  const mode = form.elements.mode
-  const syncMode = () => {
-    const apiMode = mode.value !== 'mock'
-    form.querySelector('.api-fields').classList.toggle('hidden', !apiMode)
-    form.querySelector('.model-provider strong').textContent = mode.value === 'deepseek'
-      ? 'deepseek-official'
-      : mode.value === 'openai'
-        ? 'openai-compatible'
-        : 'distributed-mock'
-    form.querySelector('.base-url-help').textContent = mode.value === 'openai'
-      ? '填写 API 根地址（通常以 /v1 结尾）；也可粘贴完整 /chat/completions 地址。'
-      : ''
-  }
-  mode.addEventListener('change', () => {
-    if (mode.value === 'deepseek' && form.elements.defaultModel.value === 'mock-agent') form.elements.defaultModel.value = 'deepseek-v4-flash'
-    if (mode.value === 'openai' && (form.elements.defaultModel.value === 'mock-agent' || form.elements.defaultModel.value.startsWith('deepseek-'))) form.elements.defaultModel.value = ''
-    if (mode.value === 'mock' && form.elements.defaultModel.value !== 'mock-agent') form.elements.defaultModel.value = 'mock-agent'
-    form.elements.baseUrl.value = mode.value === 'deepseek' ? 'https://api.deepseek.com' : mode.value === 'openai' ? 'https://api.openai.com/v1' : ''
-    syncMode()
-  })
-  nav.querySelector('[data-model]').addEventListener('click', async () => {
-    const error = form.querySelector('.form-error')
-    error.textContent = ''
-    try {
-      const value = await request('/admin/model-config')
-      mode.value = value.mode
-      form.elements.defaultModel.value = value.defaultModel
-      form.elements.baseUrl.value = value.baseUrl ?? (value.mode === 'openai' ? 'https://api.openai.com/v1' : 'https://api.deepseek.com')
-      form.elements.apiKey.value = ''
-      form.elements.clearApiKey.checked = false
-      form.querySelector('.key-status').textContent = value.apiKeyConfigured ? '当前已有可用密钥；留空将继续使用' : '尚未配置密钥'
-      syncMode()
-      dialog.showModal()
-    } catch (reason) {
-      alert(reason instanceof Error ? reason.message : String(reason))
-    }
-  })
-  form.querySelector('[data-close]').addEventListener('click', () => dialog.close())
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault()
-    const submit = form.querySelector('[type="submit"]')
-    const error = form.querySelector('.form-error')
-    submit.disabled = true
-    submit.textContent = '正在保存…'
-    error.textContent = ''
-    try {
-      const data = Object.fromEntries(new FormData(form))
-      await request('/admin/model-config', {
-        method: 'PUT',
-        body: JSON.stringify({
-          mode: data.mode,
-          defaultModel: data.defaultModel,
-          baseUrl: data.baseUrl,
-          apiKey: data.apiKey,
-          clearApiKey: form.elements.clearApiKey.checked,
-        }),
-      })
-      dialog.close()
-      location.reload()
-    } catch (reason) {
-      error.textContent = reason instanceof Error ? reason.message : String(reason)
-    } finally {
-      submit.disabled = false
-      submit.textContent = '保存配置'
-    }
-  })
   nav.querySelector('[data-logout]').addEventListener('click', async () => {
     await request('/auth/logout', { method: 'POST', body: '{}' }).catch(() => undefined)
     location.reload()

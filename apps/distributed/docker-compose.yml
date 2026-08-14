@@ -106,29 +106,12 @@ services:
       timeout: 2s
       retries: 30
 
-  api-2:
-    <<: *runtime
-    command: ["node", "--import", "tsx", "apps/distributed/src/api.ts"]
-    environment:
-      <<: *runtime-env
-      API_INSTANCE_ID: api-2
-      API_PORT: "3100"
-    ports:
-      - "3102:3100"
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-      interval: 3s
-      timeout: 2s
-      retries: 30
-
   web:
     build:
       context: ../..
       dockerfile: apps/distributed/Web.Dockerfile
     depends_on:
       api-1:
-        condition: service_healthy
-      api-2:
         condition: service_healthy
     ports:
       - "20810:80"

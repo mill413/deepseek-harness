@@ -17,10 +17,10 @@ body.distributed-auth-mode { margin: 0; color: #15242f; background: #eef3f4; }
 .auth-tabs button { padding: 11px; border: 0; border-radius: 10px; color: #64777c; background: transparent; cursor: pointer; font-weight: 650; }
 .auth-tabs button.active { color: #0d5d62; background: #fff; box-shadow: 0 3px 12px #1e454a14; }
 .auth-form { display: grid; gap: 18px; }
-.auth-form.hidden, .deepseek-fields.hidden { display: none; }
+.auth-form.hidden { display: none; }
 .auth-form h2 { margin: 0 0 5px; font-size: 26px; }
 .auth-form p { margin: 0; color: #758589; }
-.auth-form label, .model-form label { display: grid; gap: 8px; color: #354a50; font-size: 14px; font-weight: 650; }
+.auth-form label { display: grid; gap: 8px; color: #354a50; font-size: 14px; font-weight: 650; }
 input, select { width: 100%; padding: 12px 13px; border: 1px solid #cbd8d9; border-radius: 10px; outline: 0; color: #183138; background: #fbfdfd; font: inherit; }
 input:focus, select:focus { border-color: #23858a; box-shadow: 0 0 0 3px #23858a1b; }
 label small { color: #809095; font-weight: 400; }
@@ -35,22 +35,6 @@ button:disabled { opacity: .55; cursor: wait; }
 .tenant-copy span { max-width: 180px; overflow: hidden; color: #718287; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .tenant-nav button { padding: 7px 9px; border: 0; border-radius: 8px; color: #385159; background: #edf3f3; cursor: pointer; font-size: 12px; }
 .tenant-nav button:hover { color: #075e63; background: #dcebea; }
-.model-dialog { width: min(540px, calc(100vw - 32px)); padding: 0; border: 1px solid #d5dfe1; border-radius: 18px; color: #193139; background: white; box-shadow: 0 32px 100px #0b202c45; }
-.model-dialog::backdrop { background: #10273185; backdrop-filter: blur(3px); }
-.dialog-title { display: flex; align-items: center; justify-content: space-between; padding: 24px 28px 18px; border-bottom: 1px solid #e6eeee; }
-.dialog-title span { color: #75888c; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-.dialog-title h2 { margin: 3px 0 0; font-size: 23px; }
-.dialog-title button { width: 34px; height: 34px; border: 0; border-radius: 9px; color: #6b7c80; background: #eef3f3; cursor: pointer; font-size: 23px; }
-.model-form { display: grid; gap: 18px; padding: 24px 28px 28px; }
-.deepseek-fields { display: grid; gap: 18px; }
-.model-provider { display: flex; align-items: center; justify-content: space-between; padding: 11px 13px; border-radius: 10px; color: #687b80; background: #f1f5f5; font-size: 13px; }
-.model-provider strong { color: #275058; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.model-form .check-row { display: flex; align-items: center; gap: 9px; font-weight: 500; }
-.check-row input { width: 16px; height: 16px; }
-.model-help { margin: 0; padding: 11px 13px; border-left: 3px solid #47a7a5; color: #61777c; background: #f1f8f7; font-size: 12px; line-height: 1.6; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 10px; }
-.dialog-actions button { padding: 10px 17px; border: 1px solid #d5dfe1; border-radius: 9px; background: white; cursor: pointer; }
-.dialog-actions button.primary { border-color: #0d6d71; background: #0d6d71; }
 .fatal-error { max-width: 680px; margin: 15vh auto; padding: 40px; }
 @media (max-width: 900px) { .auth-page { grid-template-columns: 1fr; } .auth-hero { min-height: 300px; padding: 40px; } .auth-hero h1 { margin-top: 42px; font-size: 42px; } .auth-points { margin-top: 38px; } .auth-card { margin: 34px auto; } }
 @media (max-width: 580px) { .auth-hero { min-height: 260px; padding: 28px 24px; } .auth-hero h1 { margin: 32px 0 12px; font-size: 34px; } .auth-hero > p { font-size: 15px; } .auth-points { display: none; } .auth-card { width: calc(100% - 24px); padding: 10px 24px 30px; } .tenant-copy { display: none; } .tenant-nav { top: 8px; right: 8px; } }

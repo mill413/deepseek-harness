@@ -12,7 +12,7 @@ Status: implemented
 
 上游 `base` 与 `web-app` Cordis 组合拥有分布式 Web 清单。`apps/distributed/scripts/assemble-web.mjs` 会发现这些组合中具名、且包 manifest 声明了 Web `dsh.client` 配置项的全部包，加入远程 Host 所需的浏览器目录选择器，校验客户端注入依赖，并生成由 Web 容器提供的图。分布式应用不维护功能白名单。上游新增客户端时，会通过相同的组合文件与包 manifest 进入本部署，并由分布式构建和协议测试约束。
 
-浏览器协议通过租户感知适配器实现，而不是 fork 进程内 Host。PostgreSQL 拥有工作区、会话元数据与事件、设置命名空间与修订号、加密凭据、复制的 agent 预设、目标、附件和消息反馈。API 副本提供上游会话、工作区、设置、凭据、模型、命令、目标、反馈、预设、skill、插件目录等 RPC 形状；WebSocket 投影和事件追赶读取相同的持久行。会话创建会在写入 UI 所有的事件前物化兼容上游的 `SessionHeader`，API 事件写入也会拒绝与活跃 Worker 轮次并发。
+浏览器协议通过租户感知适配器实现，而不是 fork 进程内 Host。PostgreSQL 拥有工作区、会话元数据与事件、设置命名空间与修订号、加密凭据、复制的 agent 预设、目标、附件和消息反馈。API 提供上游会话、工作区、设置、凭据、模型、命令、目标、反馈、预设、skill、插件目录等 RPC 形状；WebSocket 投影和事件追赶读取相同的持久行。会话创建会在写入 UI 所有的事件前物化兼容上游的 `SessionHeader`，API 事件写入也会拒绝与活跃 Worker 轮次并发。
 
 每条 Worker 命令都会组合上游 agent loop（智能体循环）、会话持久化与检查点策略、token 计量、基础上下文压缩（context compaction）、工具结果裁剪、计划模式、todo 工具、重复调用提醒、模型适配器和分布式工作区适配器。DeepSeek 使用上游 DeepSeek 适配器，OpenAI-compatible Chat Completions 使用上游 Pi AI 适配器。每条命令开始前都会解析租户模型设置与凭据写入，因此副本不会共享进程全局模型密钥。
 
@@ -22,7 +22,7 @@ Status: implemented
 
 ## Verification
 
-`apps/distributed/scripts/web-e2e.mjs` 通过 20810 端口验证认证、工作区选择、上游设置与模型页面、设置修改、只写凭据、agent 预设、模式、权限、目标、消息反馈、共享工作区工具、上下文压缩、WebSocket 投递和租户隔离。`e2e.mjs`、`workspace-e2e.mjs` 与 `openai-e2e.mjs` 分别覆盖双 API/双 Worker 调度与恢复、原始工作区提供方和 OpenAI-compatible 适配器。TypeScript 构建和 Web 组装器的依赖校验会拒绝适配器或客户端图漂移。
+`apps/distributed/scripts/web-e2e.mjs` 通过 20810 端口验证认证、工作区选择、上游设置与模型页面、旧模型快捷入口的移除、设置修改、只写凭据、agent 预设、模式、权限、目标、消息反馈、共享工作区工具、上下文压缩、WebSocket 投递和租户隔离。`e2e.mjs`、`workspace-e2e.mjs` 与 `openai-e2e.mjs` 分别覆盖单 API/双 Worker 调度与恢复、原始工作区提供方和 OpenAI-compatible 适配器。TypeScript 构建和 Web 组装器的依赖校验会拒绝适配器或客户端图漂移。
 
 ## Alternatives considered
 
